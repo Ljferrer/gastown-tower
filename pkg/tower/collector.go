@@ -1,0 +1,139 @@
+package tower
+
+import (
+	"os"
+	"path/filepath"
+	"sort"
+	"time"
+)
+
+// Agent is a discovered agent session with its derived stats.
+type Agent struct {
+	AgentRef
+	TranscriptPath string
+	LastActivity   time.Time
+	Churning       bool
+	Idle           time.Duration // since last activity
+	Stats          TranscriptStats
+}
+
+// Group is a set of agents sharing a grouping key (town or a rig).
+type Group struct {
+	Name   string
+	Agents []Agent
+}
+
+// Snapshot is a point-in-time view of all active agents in the town.
+type Snapshot struct {
+	GeneratedAt time.Time
+	Groups      []Group
+}
+
+// Collector reads the live town's artifacts (transcripts, and later gt/bd) and
+// assembles snapshots. Construct with NewCollector.
+type Collector struct {
+	TownRoot     string
+	ProjectsDir  string
+	ChurnWindow  time.Duration // active write within this => "churning"
+	ActiveWindow time.Duration // ignore sessions idle longer than this
+	now          func() time.Time
+}
+
+// NewCollector returns a Collector for the given town root with sane defaults.
+func NewCollector(townRoot string) *Collector {
+	home, _ := os.UserHomeDir()
+	return &Collector{
+		TownRoot:     townRoot,
+		ProjectsDir:  filepath.Join(home, ".claude", "projects"),
+		ChurnWindow:  8 * time.Second,
+		ActiveWindow: 30 * time.Minute,
+		now:          time.Now,
+	}
+}
+
+// Snapshot discovers active agent sessions under the town and derives stats.
+func (c *Collector) Snapshot() (Snapshot, error) {
+	entries, err := os.ReadDir(c.ProjectsDir)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	townSlug := slugify(c.TownRoot)
+	now := c.now()
+	byGroup := map[string][]Agent{}
+
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		segs, ok := segmentsBelow(e.Name(), townSlug)
+		if !ok {
+			continue
+		}
+		ref, ok := classifyPath(segs)
+		if !ok {
+			continue
+		}
+		tx, mt, ok := latestTranscript(filepath.Join(c.ProjectsDir, e.Name()))
+		if !ok || now.Sub(mt) > c.ActiveWindow {
+			continue
+		}
+		stats, err := ParseTranscript(tx)
+		if err != nil {
+			continue
+		}
+		byGroup[ref.Group] = append(byGroup[ref.Group], Agent{
+			AgentRef:       ref,
+			TranscriptPath: tx,
+			LastActivity:   mt,
+			Churning:       now.Sub(mt) <= c.ChurnWindow,
+			Idle:           now.Sub(mt),
+			Stats:          stats,
+		})
+	}
+	return assemble(byGroup, now), nil
+}
+
+// latestTranscript returns the most-recently-modified *.jsonl in dir.
+func latestTranscript(dir string) (path string, mod time.Time, ok bool) {
+	matches, _ := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	for _, m := range matches {
+		fi, err := os.Stat(m)
+		if err != nil {
+			continue
+		}
+		if fi.ModTime().After(mod) {
+			path, mod, ok = m, fi.ModTime(), true
+		}
+	}
+	return
+}
+
+// assemble orders groups (town first, then rigs alphabetically) and agents
+// within a group (churning first, then by name).
+func assemble(byGroup map[string][]Agent, now time.Time) Snapshot {
+	var names []string
+	for g := range byGroup {
+		names = append(names, g)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		if names[i] == townGroup {
+			return true
+		}
+		if names[j] == townGroup {
+			return false
+		}
+		return names[i] < names[j]
+	})
+	snap := Snapshot{GeneratedAt: now}
+	for _, g := range names {
+		agents := byGroup[g]
+		sort.Slice(agents, func(i, j int) bool {
+			if agents[i].Churning != agents[j].Churning {
+				return agents[i].Churning
+			}
+			return agents[i].Name < agents[j].Name
+		})
+		snap.Groups = append(snap.Groups, Group{Name: g, Agents: agents})
+	}
+	return snap
+}
