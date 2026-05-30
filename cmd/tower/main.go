@@ -15,7 +15,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Ljferrer/gastown-tower/internal/tui"
 	"github.com/Ljferrer/gastown-tower/pkg/tower"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func main() {
@@ -25,14 +27,29 @@ func main() {
 	switch os.Args[1] {
 	case "snapshot":
 		runSnapshot(os.Args[2:])
+	case "tui":
+		runTUI(os.Args[2:])
 	default:
 		usage()
 	}
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: tower snapshot [--town <dir>]")
+	fmt.Fprintln(os.Stderr, "usage: tower <snapshot|tui> [--town <dir>]")
 	os.Exit(2)
+}
+
+func runTUI(args []string) {
+	fs := flag.NewFlagSet("tui", flag.ExitOnError)
+	town := fs.String("town", defaultTown(), "town root directory")
+	_ = fs.Parse(args)
+
+	c := tower.NewCollector(*town)
+	p := tea.NewProgram(tui.New(c), tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintln(os.Stderr, "tui:", err)
+		os.Exit(1)
+	}
 }
 
 func runSnapshot(args []string) {
