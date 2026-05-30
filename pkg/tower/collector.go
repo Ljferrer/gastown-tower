@@ -127,10 +127,10 @@ func assemble(byGroup map[string][]Agent, now time.Time) Snapshot {
 	snap := Snapshot{GeneratedAt: now}
 	for _, g := range names {
 		agents := byGroup[g]
+		// Stable ordering: sort by name only. Churn state must NOT affect
+		// position (otherwise agents jump around as they start/stop working);
+		// it is conveyed by the dot, not the row order.
 		sort.Slice(agents, func(i, j int) bool {
-			if agents[i].Churning != agents[j].Churning {
-				return agents[i].Churning
-			}
 			return agents[i].Name < agents[j].Name
 		})
 		snap.Groups = append(snap.Groups, Group{Name: g, Agents: agents})
