@@ -28,8 +28,8 @@ func TestClassifyPath(t *testing.T) {
 }
 
 func TestSegmentsBelow(t *testing.T) {
-	town := "-Users-lukasferrer-gt"
-	segs, ok := segmentsBelow("-Users-lukasferrer-gt-GigaClip-witness", town)
+	town := "-Users-example-gt"
+	segs, ok := segmentsBelow("-Users-example-gt-GigaClip-witness", town)
 	if !ok || !reflect.DeepEqual(segs, []string{"GigaClip", "witness"}) {
 		t.Errorf("got %v,%v", segs, ok)
 	}
@@ -42,7 +42,7 @@ func TestSegmentsBelow(t *testing.T) {
 }
 
 func TestSlugify(t *testing.T) {
-	if got := slugify("/Users/lukasferrer/gt"); got != "-Users-lukasferrer-gt" {
+	if got := slugify("/Users/example/gt"); got != "-Users-example-gt" {
 		t.Fatalf("slugify = %q", got)
 	}
 }
