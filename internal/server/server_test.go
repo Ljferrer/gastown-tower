@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,6 +70,26 @@ func TestSnapshotReturnsValidJSON(t *testing.T) {
 	}
 	if !got.GeneratedAt.Equal(at) {
 		t.Fatalf("GeneratedAt = %v, want %v", got.GeneratedAt, at)
+	}
+}
+
+func TestServesEmbeddedSPAAtRoot(t *testing.T) {
+	srv := New(&fakeSnapshotter{snaps: []tower.Snapshot{sampleSnapshot(time.Now())}})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET / status = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("GET / Content-Type = %q, want text/html", ct)
+	}
+	// The built Svelte SPA mounts into <div id="app">; assert the embedded
+	// bundle is the real UI, not the pre-Slice-5 placeholder page.
+	if body := rec.Body.String(); !strings.Contains(body, `id="app"`) {
+		t.Fatalf("GET / did not serve the embedded SPA shell; body=%q", body)
 	}
 }
 

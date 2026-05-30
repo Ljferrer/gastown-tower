@@ -1,0 +1,82 @@
+/*
+ * Design tokens — industrial-dossier direction.
+ *
+ * A dark, warm steel surface read like a classified field-ops dossier:
+ * charcoal paper, amber typewriter accent (mirrors the town color), hairline
+ * rules, and stamped monospace labels. All color is OKLCH so hue/chroma stay
+ * perceptually even when tints are derived.
+ *
+ * The town accent (--accent) is the OKLCH form of pkg/tower.TownColor
+ * (#e8a33d). Per-rig hues are injected inline from the same palette the Go
+ * side hashes (see lib/color.js), so a rig keeps one color across TUI + web.
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* --- surfaces: warm charcoal steel, lifted in layers --- */
+  --bg: oklch(16% 0.012 80);
+  --bg-grain: oklch(19% 0.014 80);
+  --surface: oklch(21% 0.014 82);
+  --surface-2: oklch(25% 0.016 82);
+  --surface-3: oklch(29% 0.018 82);
+  --hairline: oklch(34% 0.02 82 / 0.6);
+  --hairline-strong: oklch(42% 0.024 82 / 0.8);
+
+  /* --- ink --- */
+  --text: oklch(92% 0.012 85);
+  --text-dim: oklch(72% 0.014 85);
+  --text-faint: oklch(56% 0.014 85);
+
+  /* --- accents --- */
+  --accent: oklch(76% 0.142 75);          /* amber — town / #e8a33d */
+  --accent-dim: oklch(76% 0.142 75 / 0.5);
+  --accent-ghost: oklch(76% 0.142 75 / 0.14);
+  --churn: oklch(78% 0.17 150);           /* live green */
+  --churn-ghost: oklch(78% 0.17 150 / 0.18);
+  --alert: oklch(70% 0.19 25);            /* unread / warning red-orange */
+
+  /* --- type --- */
+  --font-mono: "SFMono-Regular", "JetBrains Mono", "Fira Code", ui-monospace,
+    "Menlo", "Consolas", monospace;
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --text-xs: 0.6875rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.9375rem;
+  --text-lg: 1.125rem;
+  --text-xl: clamp(1.4rem, 1.1rem + 1.4vw, 2rem);
+
+  --tracking-stamp: 0.18em;
+
+  /* --- rhythm --- */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2.25rem;
+  --space-section: clamp(1.5rem, 1rem + 2vw, 3rem);
+
+  --radius: 3px;
+  --radius-lg: 6px;
+
+  /* --- depth --- */
+  --shadow-panel: 0 1px 0 oklch(100% 0 0 / 0.04) inset,
+    0 8px 24px oklch(0% 0 0 / 0.45);
+  --shadow-float: 0 12px 40px oklch(0% 0 0 / 0.6);
+
+  /* --- motion --- */
+  --dur-fast: 140ms;
+  --dur: 240ms;
+  --dur-slow: 420ms;
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur: 0ms;
+    --dur-slow: 0ms;
+  }
+}

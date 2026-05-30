@@ -1,0 +1,17 @@
+{
+  "name": "gastown-tower-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Gas Town Activity Tower — Svelte web dashboard, embedded into the Go server via go:embed.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "svelte": "^5.19.0",
+    "vite": "^6.0.7"
+  }
+}
