@@ -2,3 +2,9 @@
 *.test
 *.out
 /dist/
+
+# Gas Town runtime artifacts (injected per-worktree, not project source)
+/.beads/
+/.claude/
+/.runtime/
+/CLAUDE.md
