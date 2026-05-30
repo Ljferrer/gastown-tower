@@ -77,3 +77,36 @@ func loadMail(townRoot string) (Mail, error) {
 	}
 	return parseMailInbox(string(out)), nil
 }
+
+// parseHooks builds an assignee -> hook-title map from `bd list --status=hooked
+// --json` output. Beads with no assignee are skipped.
+func parseHooks(b []byte) (map[string]string, error) {
+	var raw []struct {
+		ID       string `json:"id"`
+		Title    string `json:"title"`
+		Assignee string `json:"assignee"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return nil, err
+	}
+	hooks := make(map[string]string, len(raw))
+	for _, r := range raw {
+		if r.Assignee == "" {
+			continue
+		}
+		hooks[r.Assignee] = r.ID + ": " + r.Title
+	}
+	return hooks, nil
+}
+
+// loadHooks shells out to bd for currently-hooked beads, keyed by assignee.
+// Best-effort: the caller treats errors as "no hooks known".
+func loadHooks(townRoot string) (map[string]string, error) {
+	cmd := exec.Command("bd", "list", "--status=hooked", "--json")
+	cmd.Dir = townRoot
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	return parseHooks(out)
+}

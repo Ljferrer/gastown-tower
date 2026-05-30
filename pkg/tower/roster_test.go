@@ -11,12 +11,12 @@ func TestClassifyPath(t *testing.T) {
 		want AgentRef
 		ok   bool
 	}{
-		{[]string{"mayor"}, AgentRef{Name: "mayor", Role: "mayor", Group: "town"}, true},
-		{[]string{"deacon"}, AgentRef{Name: "deacon", Role: "deacon", Group: "town"}, true},
-		{[]string{"deacon", "dogs", "alpha"}, AgentRef{Name: "deacon/alpha", Role: "dog", Group: "town"}, true},
-		{[]string{"GigaClip", "witness"}, AgentRef{Name: "witness", Role: "witness", Rig: "GigaClip", Group: "GigaClip"}, true},
-		{[]string{"GigaClip", "refinery", "rig"}, AgentRef{Name: "refinery", Role: "refinery", Rig: "GigaClip", Group: "GigaClip"}, true},
-		{[]string{"GigaClip", "polecats", "jasper", "GigaClip"}, AgentRef{Name: "jasper", Role: "polecat", Rig: "GigaClip", Group: "GigaClip"}, true},
+		{[]string{"mayor"}, AgentRef{Name: "mayor", Role: "mayor", Group: "town", Addr: "mayor"}, true},
+		{[]string{"deacon"}, AgentRef{Name: "deacon", Role: "deacon", Group: "town", Addr: "deacon"}, true},
+		{[]string{"deacon", "dogs", "alpha"}, AgentRef{Name: "deacon/alpha", Role: "dog", Group: "town", Addr: "deacon/dogs/alpha"}, true},
+		{[]string{"GigaClip", "witness"}, AgentRef{Name: "witness", Role: "witness", Rig: "GigaClip", Group: "GigaClip", Addr: "GigaClip/witness"}, true},
+		{[]string{"GigaClip", "refinery", "rig"}, AgentRef{Name: "refinery", Role: "refinery", Rig: "GigaClip", Group: "GigaClip", Addr: "GigaClip/refinery"}, true},
+		{[]string{"GigaClip", "polecats", "jasper", "GigaClip"}, AgentRef{Name: "jasper", Role: "polecat", Rig: "GigaClip", Group: "GigaClip", Addr: "GigaClip/polecats/jasper"}, true},
 		{[]string{}, AgentRef{}, false},
 	}
 	for _, c := range cases {

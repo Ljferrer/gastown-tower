@@ -77,3 +77,45 @@ func TestQuit(t *testing.T) {
 		t.Fatal("ctrl+c should return a quit command")
 	}
 }
+
+func TestRenderTown(t *testing.T) {
+	if got := renderTown(tower.TownStatus{}); got != "" {
+		t.Errorf("empty town status should render nothing, got %q", got)
+	}
+	full := tower.TownStatus{
+		Reputation: tower.Reputation{Tier: "Bronze", Stamps: 7},
+		Mail:       tower.Mail{Total: 5, Unread: 2},
+	}
+	out := renderTown(full)
+	for _, want := range []string{"✉ 2/5", "Bronze", "7 stamps"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("renderTown() missing %q in %q", want, out)
+		}
+	}
+}
+
+func TestViewShowsTownAndHook(t *testing.T) {
+	m := New(nil)
+	snap := fixtureSnapshot()
+	snap.Town = tower.TownStatus{
+		Reputation: tower.Reputation{Tier: "Bronze", Stamps: 7},
+		Mail:       tower.Mail{Total: 5, Unread: 2},
+	}
+	snap.Groups[0].Agents[0].Hook = "gtt-vsq: Slice 3"
+	m.snap = snap
+	m.flatten()
+
+	out := m.View()
+	if !strings.Contains(out, "✉ 2/5") || !strings.Contains(out, "Bronze") {
+		t.Errorf("View() missing town status line: %q", out)
+	}
+	if !strings.Contains(out, "🪝") {
+		t.Errorf("View() missing hook glyph for hooked agent")
+	}
+
+	// Expand the hooked agent and confirm the full hook line shows.
+	m.expanded["town/mayor"] = true
+	if !strings.Contains(m.View(), "hook gtt-vsq: Slice 3") {
+		t.Errorf("expanded view missing hook detail")
+	}
+}
