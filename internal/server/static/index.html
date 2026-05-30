@@ -1,0 +1,25 @@
+<!doctype html>
+<!--
+  Placeholder for the embedded Tower web UI.
+
+  Slice 5 replaces this directory's contents with the built web bundle
+  (e.g. a compiled SPA). The server already mounts internal/server/static
+  via go:embed at "/", so dropping real assets here is all that's needed.
+
+  Until then this page just points operators at the live JSON + SSE APIs.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Gas Town Activity Tower</title>
+  </head>
+  <body>
+    <h1>Gas Town Activity Tower</h1>
+    <p>The web UI ships in a later slice. The backend is live:</p>
+    <ul>
+      <li><a href="/api/snapshot">/api/snapshot</a> &mdash; current snapshot (JSON)</li>
+      <li><code>/api/stream</code> &mdash; live updates (Server-Sent Events)</li>
+    </ul>
+  </body>
+</html>

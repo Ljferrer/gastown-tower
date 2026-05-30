@@ -10,15 +10,21 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/Ljferrer/gastown-tower/internal/server"
 	"github.com/Ljferrer/gastown-tower/internal/tui"
 	"github.com/Ljferrer/gastown-tower/pkg/tower"
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+// defaultAddr binds to loopback only — the Tower exposes local activity and
+// must not be reachable off-box without an explicit opt-in via --addr.
+const defaultAddr = "127.0.0.1:8080"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -29,13 +35,15 @@ func main() {
 		runSnapshot(os.Args[2:])
 	case "tui":
 		runTUI(os.Args[2:])
+	case "serve":
+		runServe(os.Args[2:])
 	default:
 		usage()
 	}
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: tower <snapshot|tui> [--town <dir>]")
+	fmt.Fprintln(os.Stderr, "usage: tower <snapshot|tui|serve> [--town <dir>] [--addr <host:port>]")
 	os.Exit(2)
 }
 
@@ -48,6 +56,20 @@ func runTUI(args []string) {
 	p := tea.NewProgram(tui.New(c), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "tui:", err)
+		os.Exit(1)
+	}
+}
+
+func runServe(args []string) {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	town := fs.String("town", defaultTown(), "town root directory")
+	addr := fs.String("addr", defaultAddr, "listen address (host:port)")
+	_ = fs.Parse(args)
+
+	srv := server.New(tower.NewCollector(*town))
+	fmt.Fprintf(os.Stderr, "tower serve: listening on http://%s\n", *addr)
+	if err := http.ListenAndServe(*addr, srv.Handler()); err != nil {
+		fmt.Fprintln(os.Stderr, "serve:", err)
 		os.Exit(1)
 	}
 }
