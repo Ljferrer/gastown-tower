@@ -112,6 +112,10 @@ func (m Model) View() string {
 	b.WriteString("  " + dimStyle.Render(m.snap.GeneratedAt.Format("15:04:05")))
 	b.WriteString("  " + dimStyle.Render(fmt.Sprintf("%d active", len(m.agents))) + "\n")
 
+	if town := renderTown(m.snap.Town); town != "" {
+		b.WriteString(town + "\n")
+	}
+
 	if m.err != nil {
 		b.WriteString("\n  " + dimStyle.Render("error: "+m.err.Error()) + "\n")
 	}
@@ -136,6 +140,26 @@ func (m Model) View() string {
 	return b.String()
 }
 
+// renderTown formats the town-status line: mail envelope with unread/total and
+// the reputation tier with stamp count. Returns "" when nothing is known.
+func renderTown(t tower.TownStatus) string {
+	var parts []string
+	if t.Mail.Total > 0 || t.Mail.Unread > 0 {
+		parts = append(parts, fmt.Sprintf("✉ %d/%d", t.Mail.Unread, t.Mail.Total))
+	}
+	if t.Reputation.Tier != "" {
+		rep := "🏅 " + t.Reputation.Tier
+		if t.Reputation.Stamps > 0 {
+			rep += fmt.Sprintf(" · %d stamps", t.Reputation.Stamps)
+		}
+		parts = append(parts, rep)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "  " + dimStyle.Render(strings.Join(parts, "   "))
+}
+
 func renderAgent(a tower.Agent, selected bool, gc lipgloss.Color) string {
 	dot := dimStyle.Render("○")
 	if a.Churning {
@@ -153,8 +177,12 @@ func renderAgent(a tower.Agent, selected bool, gc lipgloss.Color) string {
 	if !a.Churning {
 		activity = dimStyle.Render("idle " + roundDur(a.Idle).String())
 	}
-	return fmt.Sprintf("%s%s %-12s %s %3.0f%%  %s\n",
-		cursor, dot, name, meter, pct*100, activity)
+	hook := ""
+	if a.Hook != "" {
+		hook = " " + dimStyle.Render("🪝")
+	}
+	return fmt.Sprintf("%s%s %-12s %s %3.0f%%  %s%s\n",
+		cursor, dot, name, meter, pct*100, activity, hook)
 }
 
 func renderExpanded(a tower.Agent) string {
@@ -164,6 +192,9 @@ func renderExpanded(a tower.Agent) string {
 		fmt.Sprintf("model %s · ctx %s/%s tok", short(s.Model), human(s.ContextTokens), human(win)),
 		fmt.Sprintf("%d turns · %d tools · %d reads · %s out", s.Turns, s.ToolCalls, s.FileReads, human(s.OutputTokens)),
 		fmt.Sprintf("role %s · rig %s · last %s ago", a.Role, orDash(a.Rig), roundDur(a.Idle)),
+	}
+	if a.Hook != "" {
+		lines = append(lines, "hook "+a.Hook)
 	}
 	var b strings.Builder
 	for _, ln := range lines {

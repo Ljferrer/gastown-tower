@@ -9,6 +9,7 @@ type AgentRef struct {
 	Role  string // mayor|deacon|dog|witness|refinery|polecat|crew|rig
 	Rig   string // "" for town-level agents
 	Group string // "town" or the rig name — the grouping/coloring key
+	Addr  string // mail/bd assignee address, e.g. "GasTownTower/polecats/jasper"
 }
 
 // townGroup is the group key for town-level (HQ) infrastructure agents.
@@ -16,8 +17,10 @@ const townGroup = "town"
 
 // classifyPath maps the path segments *below the town root* to an AgentRef.
 // e.g. ["GigaClip","witness"] -> witness of rig GigaClip;
-//      ["deacon","dogs","alpha"] -> deacon dog "alpha" (town);
-//      ["GigaClip","polecats","jasper","GigaClip"] -> polecat "jasper" of GigaClip.
+//
+//	["deacon","dogs","alpha"] -> deacon dog "alpha" (town);
+//	["GigaClip","polecats","jasper","GigaClip"] -> polecat "jasper" of GigaClip.
+//
 // Returns ok=false for paths that are not agent sessions (e.g. the bare town root).
 func classifyPath(segments []string) (AgentRef, bool) {
 	if len(segments) == 0 {
@@ -25,12 +28,12 @@ func classifyPath(segments []string) (AgentRef, bool) {
 	}
 	switch head := segments[0]; head {
 	case "mayor":
-		return AgentRef{Name: "mayor", Role: "mayor", Group: townGroup}, true
+		return AgentRef{Name: "mayor", Role: "mayor", Group: townGroup, Addr: "mayor"}, true
 	case "deacon":
 		if len(segments) >= 3 && segments[1] == "dogs" {
-			return AgentRef{Name: "deacon/" + segments[2], Role: "dog", Group: townGroup}, true
+			return AgentRef{Name: "deacon/" + segments[2], Role: "dog", Group: townGroup, Addr: "deacon/dogs/" + segments[2]}, true
 		}
-		return AgentRef{Name: "deacon", Role: "deacon", Group: townGroup}, true
+		return AgentRef{Name: "deacon", Role: "deacon", Group: townGroup, Addr: "deacon"}, true
 	default:
 		rig := head
 		if len(segments) == 1 {
@@ -38,21 +41,21 @@ func classifyPath(segments []string) (AgentRef, bool) {
 		}
 		switch sub := segments[1]; sub {
 		case "witness":
-			return AgentRef{Name: "witness", Role: "witness", Rig: rig, Group: rig}, true
+			return AgentRef{Name: "witness", Role: "witness", Rig: rig, Group: rig, Addr: rig + "/witness"}, true
 		case "refinery":
-			return AgentRef{Name: "refinery", Role: "refinery", Rig: rig, Group: rig}, true
+			return AgentRef{Name: "refinery", Role: "refinery", Rig: rig, Group: rig, Addr: rig + "/refinery"}, true
 		case "polecats":
 			name := "polecat"
 			if len(segments) >= 3 {
 				name = segments[2]
 			}
-			return AgentRef{Name: name, Role: "polecat", Rig: rig, Group: rig}, true
+			return AgentRef{Name: name, Role: "polecat", Rig: rig, Group: rig, Addr: rig + "/polecats/" + name}, true
 		case "crew":
 			name := "crew"
 			if len(segments) >= 3 {
 				name = segments[2]
 			}
-			return AgentRef{Name: name, Role: "crew", Rig: rig, Group: rig}, true
+			return AgentRef{Name: name, Role: "crew", Rig: rig, Group: rig, Addr: rig + "/crew/" + name}, true
 		default:
 			return AgentRef{Name: rig + "/" + sub, Role: "rig", Rig: rig, Group: rig}, true
 		}

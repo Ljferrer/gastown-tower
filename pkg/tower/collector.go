@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -15,6 +16,7 @@ type Agent struct {
 	Churning       bool
 	Idle           time.Duration // since last activity
 	Stats          TranscriptStats
+	Hook           string // active hooked bead ("id: title"), "" when none
 }
 
 // Group is a set of agents sharing a grouping key (town or a rig).
@@ -26,7 +28,16 @@ type Group struct {
 // Snapshot is a point-in-time view of all active agents in the town.
 type Snapshot struct {
 	GeneratedAt time.Time
+	Town        TownStatus
 	Groups      []Group
+}
+
+// enrichment bundles the slow-changing town-level data (reputation, mail, and
+// per-assignee hooks) fetched by shelling out to gt/bd. It is TTL-cached so the
+// fast transcript refresh never pays the shell-out cost.
+type enrichment struct {
+	town  TownStatus
+	hooks map[string]string // assignee -> "id: title"
 }
 
 // Collector reads the live town's artifacts (transcripts, and later gt/bd) and
@@ -36,18 +47,33 @@ type Collector struct {
 	ProjectsDir  string
 	ChurnWindow  time.Duration // active write within this => "churning"
 	ActiveWindow time.Duration // ignore sessions idle longer than this
+	EnrichTTL    time.Duration // how long town/hook enrichment is cached
 	now          func() time.Time
+
+	// Injectable loaders (overridable in tests); default to the real gt/bd
+	// shell-outs. Each is best-effort — errors leave its data empty.
+	loadReputation func(townRoot string) (Reputation, error)
+	loadMail       func(townRoot string) (Mail, error)
+	loadHooks      func(townRoot string) (map[string]string, error)
+
+	mu       sync.Mutex
+	enrich   enrichment
+	enrichAt time.Time
 }
 
 // NewCollector returns a Collector for the given town root with sane defaults.
 func NewCollector(townRoot string) *Collector {
 	home, _ := os.UserHomeDir()
 	return &Collector{
-		TownRoot:     townRoot,
-		ProjectsDir:  filepath.Join(home, ".claude", "projects"),
-		ChurnWindow:  8 * time.Second,
-		ActiveWindow: 30 * time.Minute,
-		now:          time.Now,
+		TownRoot:       townRoot,
+		ProjectsDir:    filepath.Join(home, ".claude", "projects"),
+		ChurnWindow:    8 * time.Second,
+		ActiveWindow:   30 * time.Minute,
+		EnrichTTL:      15 * time.Second,
+		now:            time.Now,
+		loadReputation: loadReputation,
+		loadMail:       loadMail,
+		loadHooks:      loadHooks,
 	}
 }
 
@@ -90,7 +116,42 @@ func (c *Collector) Snapshot() (Snapshot, error) {
 			Stats:          stats,
 		})
 	}
-	return assemble(byGroup, now), nil
+
+	en := c.fetchEnrichment(now)
+	snap := assemble(byGroup, now)
+	snap.Town = en.town
+	for gi := range snap.Groups {
+		for ai := range snap.Groups[gi].Agents {
+			a := &snap.Groups[gi].Agents[ai]
+			if a.Addr != "" {
+				a.Hook = en.hooks[a.Addr]
+			}
+		}
+	}
+	return snap, nil
+}
+
+// enrichment returns the cached town/hook enrichment, refetching only when the
+// cache is older than EnrichTTL. Best-effort: a failing loader contributes empty
+// data but never blocks a snapshot. Safe for concurrent callers.
+func (c *Collector) fetchEnrichment(now time.Time) enrichment {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.enrichAt.IsZero() && now.Sub(c.enrichAt) < c.EnrichTTL {
+		return c.enrich
+	}
+	en := enrichment{hooks: map[string]string{}}
+	if rep, err := c.loadReputation(c.TownRoot); err == nil {
+		en.town.Reputation = rep
+	}
+	if mail, err := c.loadMail(c.TownRoot); err == nil {
+		en.town.Mail = mail
+	}
+	if hooks, err := c.loadHooks(c.TownRoot); err == nil {
+		en.hooks = hooks
+	}
+	c.enrich, c.enrichAt = en, now
+	return en
 }
 
 // latestTranscript returns the most-recently-modified *.jsonl in dir.
