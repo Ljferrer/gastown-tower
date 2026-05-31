@@ -16,7 +16,8 @@ type Agent struct {
 	Churning       bool
 	Idle           time.Duration // since last activity
 	Stats          TranscriptStats
-	Hook           string // active hooked bead ("id: title"), "" when none
+	Hook           string       // active hooked bead ("id: title"), "" when none
+	Turn           TurnProgress // current-turn elapsed/tokens (set while churning)
 }
 
 // Group is a set of agents sharing a grouping key (town or a rig).
@@ -36,8 +37,9 @@ type Snapshot struct {
 // per-assignee hooks) fetched by shelling out to gt/bd. It is TTL-cached so the
 // fast transcript refresh never pays the shell-out cost.
 type enrichment struct {
-	town  TownStatus
-	hooks map[string]string // assignee -> "id: title"
+	town     TownStatus
+	hooks    map[string]string // assignee -> "id: title"
+	prefixes map[string]string // rig path -> tmux session prefix (from routes.jsonl)
 }
 
 // Collector reads the live town's artifacts (transcripts, and later gt/bd) and
@@ -45,7 +47,7 @@ type enrichment struct {
 type Collector struct {
 	TownRoot     string
 	ProjectsDir  string
-	ChurnWindow  time.Duration // active write within this => "churning"
+	ChurnWindow  time.Duration // mtime-fallback window when no pane is available
 	ActiveWindow time.Duration // ignore sessions idle longer than this
 	EnrichTTL    time.Duration // how long town/hook enrichment is cached
 	now          func() time.Time
@@ -55,6 +57,12 @@ type Collector struct {
 	loadReputation func(townRoot string) (Reputation, error)
 	loadMail       func(townRoot string) (Mail, error)
 	loadHooks      func(townRoot string) (map[string]string, error)
+	loadPrefixes   func(townRoot string) (map[string]string, error)
+
+	// Liveness probes (injectable in tests); default to real tmux shell-outs.
+	// Best-effort — failures degrade churn detection to the mtime heuristic.
+	listSessions func() (map[string]struct{}, error)
+	capturePane  func(session string) (string, error)
 
 	mu       sync.Mutex
 	enrich   enrichment
@@ -74,6 +82,9 @@ func NewCollector(townRoot string) *Collector {
 		loadReputation: loadReputation,
 		loadMail:       loadMail,
 		loadHooks:      loadHooks,
+		loadPrefixes:   loadSessionPrefixes,
+		listSessions:   listTmuxSessions,
+		capturePane:    capturePane,
 	}
 }
 
@@ -86,6 +97,11 @@ func (c *Collector) Snapshot() (Snapshot, error) {
 	townSlug := slugify(c.TownRoot)
 	now := c.now()
 	byGroup := map[string][]Agent{}
+
+	// Enrichment (incl. session prefixes) is cached; the live session set is
+	// fetched fresh each pass since liveness is exactly what churn tracks.
+	en := c.fetchEnrichment(now)
+	sessions, _ := c.listSessions() // best-effort; nil => mtime fallback everywhere
 
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -107,17 +123,18 @@ func (c *Collector) Snapshot() (Snapshot, error) {
 		if err != nil {
 			continue
 		}
+		churning, turn := c.churnState(ref, en.prefixes, sessions, mt, now)
 		byGroup[ref.Group] = append(byGroup[ref.Group], Agent{
 			AgentRef:       ref,
 			TranscriptPath: tx,
 			LastActivity:   mt,
-			Churning:       now.Sub(mt) <= c.ChurnWindow,
+			Churning:       churning,
+			Turn:           turn,
 			Idle:           now.Sub(mt),
 			Stats:          stats,
 		})
 	}
 
-	en := c.fetchEnrichment(now)
 	snap := assemble(byGroup, now)
 	snap.Town = en.town
 	for gi := range snap.Groups {
@@ -140,7 +157,7 @@ func (c *Collector) fetchEnrichment(now time.Time) enrichment {
 	if !c.enrichAt.IsZero() && now.Sub(c.enrichAt) < c.EnrichTTL {
 		return c.enrich
 	}
-	en := enrichment{hooks: map[string]string{}}
+	en := enrichment{hooks: map[string]string{}, prefixes: map[string]string{}}
 	if rep, err := c.loadReputation(c.TownRoot); err == nil {
 		en.town.Reputation = rep
 	}
@@ -150,8 +167,31 @@ func (c *Collector) fetchEnrichment(now time.Time) enrichment {
 	if hooks, err := c.loadHooks(c.TownRoot); err == nil {
 		en.hooks = hooks
 	}
+	if c.loadPrefixes != nil {
+		if prefixes, err := c.loadPrefixes(c.TownRoot); err == nil {
+			en.prefixes = prefixes
+		}
+	}
 	c.enrich, c.enrichAt = en, now
 	return en
+}
+
+// churnState reports whether an agent is actively working and, when it is, the
+// current-turn progress. The primary signal is the agent's tmux pane: the
+// working-marker means mid-turn regardless of transcript mtime (a long
+// generate writes nothing to disk until it completes). When no pane is
+// available — unknown rig, dead session, capture failure, or tmux missing — it
+// falls back to the transcript-mtime heuristic.
+func (c *Collector) churnState(ref AgentRef, prefixes map[string]string, sessions map[string]struct{}, mt, now time.Time) (bool, TurnProgress) {
+	if name, ok := tmuxSession(ref, prefixes); ok && c.capturePane != nil {
+		if _, live := sessions[name]; live {
+			if pane, err := c.capturePane(name); err == nil {
+				turn, _ := parseSpinner(pane)
+				return paneWorking(pane), turn
+			}
+		}
+	}
+	return now.Sub(mt) <= c.ChurnWindow, TurnProgress{}
 }
 
 // latestTranscript returns the most-recently-modified *.jsonl in dir.

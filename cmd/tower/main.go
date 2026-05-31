@@ -109,6 +109,8 @@ func printSnapshot(s tower.Snapshot) {
 			activity := st.NowDoing
 			if !a.Churning {
 				activity = fmt.Sprintf("idle %s", roundDur(a.Idle))
+			} else if a.Turn.Elapsed > 0 {
+				activity = fmt.Sprintf("%s %s", roundDur(a.Turn.Elapsed), st.NowDoing)
 			}
 			fmt.Printf("  %s %-10s %s %3.0f%%  · %s · %d turns %d tools %d reads · %s\n",
 				dot, a.Name, bar(st.ContextPct), st.ContextPct*100,

@@ -76,6 +76,69 @@ func TestFetchEnrichmentTTLCache(t *testing.T) {
 	}
 }
 
+// Churn is driven by the live pane working-indicator, not transcript mtime: a
+// long-generating turn (stale mtime) still reads as churning when its pane shows
+// the marker, and a quiet pane reads idle even if the transcript was just touched.
+func TestChurnStateFromPane(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	staleMtime := now.Add(-5 * time.Minute) // far outside ChurnWindow
+	freshMtime := now.Add(-1 * time.Second) // inside ChurnWindow
+	prefixes := map[string]string{".": "hq"}
+	sessions := map[string]struct{}{"hq-mayor": {}}
+	ref := AgentRef{Name: "mayor", Group: townGroup}
+
+	working := "✳ Honking… (9s · ↓ 475 tokens)\n  esc to interrupt"
+	idle := "❯ done\n  ⏵⏵ bypass permissions on · ← for agents"
+
+	c := &Collector{ChurnWindow: 8 * time.Second}
+
+	// Working pane overrides a stale mtime.
+	c.capturePane = func(string) (string, error) { return working, nil }
+	churning, tp := c.churnState(ref, prefixes, sessions, staleMtime, now)
+	if !churning {
+		t.Error("working pane with stale mtime should read as churning")
+	}
+	if tp.Tokens != 475 || tp.Elapsed != 9*time.Second {
+		t.Errorf("turn progress not parsed: %+v", tp)
+	}
+
+	// Idle pane overrides a fresh mtime.
+	c.capturePane = func(string) (string, error) { return idle, nil }
+	if churning, _ := c.churnState(ref, prefixes, sessions, freshMtime, now); churning {
+		t.Error("idle pane with fresh mtime should read as idle")
+	}
+}
+
+// When no pane is available (unknown rig, dead session, or capture error), churn
+// falls back to the transcript-mtime heuristic.
+func TestChurnStateFallsBackToMtime(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	fresh := now.Add(-2 * time.Second)
+	stale := now.Add(-1 * time.Minute)
+	prefixes := map[string]string{".": "hq"}
+	ref := AgentRef{Name: "mayor", Group: townGroup}
+
+	c := &Collector{
+		ChurnWindow: 8 * time.Second,
+		capturePane: func(string) (string, error) { return "", errors.New("no pane") },
+	}
+
+	// Session not in the live set -> mtime fallback (fresh = churning).
+	if churning, _ := c.churnState(ref, prefixes, map[string]struct{}{}, fresh, now); !churning {
+		t.Error("missing session with fresh mtime should fall back to churning")
+	}
+	// Capture error -> mtime fallback (stale = idle).
+	sessions := map[string]struct{}{"hq-mayor": {}}
+	if churning, _ := c.churnState(ref, prefixes, sessions, stale, now); churning {
+		t.Error("capture error with stale mtime should fall back to idle")
+	}
+	// Unknown rig (no prefix) -> mtime fallback.
+	ghost := AgentRef{Name: "x", Rig: "Nope", Group: "Nope"}
+	if churning, _ := c.churnState(ghost, prefixes, sessions, fresh, now); !churning {
+		t.Error("unknown rig with fresh mtime should fall back to churning")
+	}
+}
+
 // A failing loader must not abort enrichment — the others still populate, and
 // the timestamp still advances so we don't hammer the failing command.
 func TestFetchEnrichmentBestEffort(t *testing.T) {

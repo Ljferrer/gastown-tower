@@ -176,6 +176,8 @@ func renderAgent(a tower.Agent, selected bool, gc lipgloss.Color) string {
 	activity := a.Stats.NowDoing
 	if !a.Churning {
 		activity = dimStyle.Render("idle " + roundDur(a.Idle).String())
+	} else if a.Turn.Elapsed > 0 {
+		activity = dimStyle.Render(roundDur(a.Turn.Elapsed).String()+" ") + activity
 	}
 	hook := ""
 	if a.Hook != "" {
