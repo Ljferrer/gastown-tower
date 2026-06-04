@@ -1,6 +1,6 @@
 # Gas Town Tower
 
-`tower` renders a Gas Town's live agent activity — who is working, on what, and
+`tower` renders the Gas Town's live agent activity — who is working, on what, and
 how busy the town is right now.
 
 ## Subcommands
