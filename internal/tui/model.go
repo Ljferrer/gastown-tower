@@ -191,10 +191,10 @@ func (m Model) matches(a tower.Agent) bool {
 	return strings.Contains(hay, strings.ToLower(m.query))
 }
 
-// convoyCount reports how many rows the convoys panel currently has. That data
-// source arrives in a later phase (gtt-975.5); until then the panel is empty but
-// the focus/scroll machinery is wired and tested.
-func convoyCount(tower.Snapshot) int { return 0 }
+// convoyCount reports how many rows the convoys panel currently has, so the
+// focus/scroll machinery can bound the viewport. The panel stacks convoy rows
+// above the merge-queue rows.
+func convoyCount(s tower.Snapshot) int { return len(s.Convoys) + len(s.MergeQueue) }
 
 // visibleEvents is the EVENTS panel's display list: the snapshot's newest-first
 // events with the curated filter (unless show-all) and the active search query
@@ -322,8 +322,92 @@ func (m Model) renderAgentsPanel() string {
 }
 
 func (m Model) renderConvoysPanel() string {
-	b := panelHeader("CONVOYS", "in-progress · landed 24h", m.focus == panelConvoys)
-	return b + "  " + dimStyle.Render("(no convoy data yet)") + "\n"
+	var b strings.Builder
+	b.WriteString(panelHeader("CONVOYS", "in-progress · landed 24h", m.focus == panelConvoys))
+	if len(m.snap.Convoys) == 0 {
+		b.WriteString("  " + dimStyle.Render("no active convoys") + "\n")
+	} else {
+		for _, cv := range m.snap.Convoys {
+			b.WriteString(renderConvoy(cv))
+		}
+	}
+	b.WriteString(m.renderMergeQueue())
+	return b.String()
+}
+
+func renderConvoy(cv tower.Convoy) string {
+	glyph := dimStyle.Render("○")
+	switch {
+	case cv.Status == "closed":
+		glyph = churnStyle.Render("✓")
+	case cv.Completed > 0:
+		glyph = lipgloss.NewStyle().Foreground(lipgloss.Color("221")).Render("◐") // partial
+	}
+	title := strings.TrimPrefix(cv.Title, "Work: ")
+	line := fmt.Sprintf("  %s %-4s %s", glyph, fmt.Sprintf("%d/%d", cv.Completed, cv.Total), title)
+	if who := convoyWho(cv); who != "" {
+		line += "  " + dimStyle.Render(who)
+	}
+	return line + "\n"
+}
+
+// convoyWho lists the distinct assignees of a convoy's tracked beads (leaf names
+// only), so the operator sees who is carrying the work.
+func convoyWho(cv tower.Convoy) string {
+	var names []string
+	seen := map[string]bool{}
+	for _, t := range cv.Tracked {
+		if t.Assignee == "" {
+			continue
+		}
+		n := leafName(t.Assignee)
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		names = append(names, n)
+	}
+	return strings.Join(names, ", ")
+}
+
+func (m Model) renderMergeQueue() string {
+	mq := m.snap.MergeQueue
+	head := "  " + dimStyle.Render(fmt.Sprintf("merge queue · %d pending", len(mq))) + "\n"
+	if len(mq) == 0 {
+		return head
+	}
+	var b strings.Builder
+	b.WriteString(head)
+	for _, mr := range mq {
+		id := mr.SourceIssue
+		if id == "" {
+			id = mr.ID
+		}
+		meta := joinNonEmpty([]string{mr.Rig, mr.Worker, mr.Status}, " · ")
+		line := "    ↳ " + id
+		if meta != "" {
+			line += "  " + dimStyle.Render(meta)
+		}
+		b.WriteString(line + "\n")
+	}
+	return b.String()
+}
+
+func leafName(addr string) string {
+	if i := strings.LastIndex(addr, "/"); i >= 0 {
+		return addr[i+1:]
+	}
+	return addr
+}
+
+func joinNonEmpty(parts []string, sep string) string {
+	var kept []string
+	for _, p := range parts {
+		if p != "" {
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, sep)
 }
 
 // eventsViewport caps how many event rows render at once; eventScroll indexes

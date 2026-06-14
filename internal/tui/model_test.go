@@ -340,6 +340,87 @@ func TestEventsSearchFilters(t *testing.T) {
 	}
 }
 
+func convoyFixture() tower.Snapshot {
+	s := fixtureSnapshot()
+	s.Convoys = []tower.Convoy{
+		{ID: "hq-cv-1", Title: "Work: Phase 2: convoys panel", Status: "open", Completed: 0, Total: 1,
+			Tracked: []tower.ConvoyItem{{ID: "gtt-975.5", Assignee: "GasTownTower/polecats/slit"}}},
+		{ID: "hq-cv-2", Title: "Work: Layout", Status: "closed", Completed: 1, Total: 1,
+			Tracked: []tower.ConvoyItem{{ID: "gtt-975.1", Assignee: "GasTownTower/polecats/furiosa"}}},
+	}
+	s.MergeQueue = []tower.MergeRequest{
+		{ID: "mr-1", SourceIssue: "gtt-975.1", Worker: "furiosa", Rig: "GasTownTower", Status: "open"},
+	}
+	return s
+}
+
+func TestConvoysPanelRenders(t *testing.T) {
+	m := New(nil)
+	m.snap = convoyFixture()
+	m.flatten()
+	out := m.View()
+	for _, want := range []string{
+		"CONVOYS",
+		"Phase 2: convoys panel", // "Work: " prefix stripped
+		"0/1", "1/1",
+		"slit", "furiosa", // assignee leaf names
+		"merge queue · 1 pending",
+		"gtt-975.1", // MR source issue
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("convoys panel missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "no active convoys") {
+		t.Errorf("should not show empty state with convoys present:\n%s", out)
+	}
+}
+
+func TestConvoysPanelEmpty(t *testing.T) {
+	m := newWithSnap() // fixtureSnapshot has no convoys/MQ
+	out := m.View()
+	if !strings.Contains(out, "no active convoys") {
+		t.Errorf("empty convoys panel should show empty state:\n%s", out)
+	}
+	if !strings.Contains(out, "merge queue · 0 pending") {
+		t.Errorf("empty MQ should show 0 pending:\n%s", out)
+	}
+}
+
+func TestConvoyCount(t *testing.T) {
+	if n := convoyCount(convoyFixture()); n != 3 { // 2 convoys + 1 MR
+		t.Errorf("convoyCount = %d, want 3", n)
+	}
+	if n := convoyCount(fixtureSnapshot()); n != 0 {
+		t.Errorf("convoyCount (empty) = %d, want 0", n)
+	}
+}
+
+// Scrolling the focused CONVOYS panel must stay within the row count and never
+// move the agent cursor.
+func TestConvoyScrollBounds(t *testing.T) {
+	m := New(nil)
+	m.snap = convoyFixture()
+	m.flatten()
+	// Focus CONVOYS.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(Model)
+	if m.focus != panelConvoys {
+		t.Fatalf("focus = %v, want panelConvoys", m.focus)
+	}
+	// Scroll down well past the end; index must clamp to count-1 (3 rows → max 2).
+	for i := 0; i < 10; i++ {
+		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		m = next.(Model)
+	}
+	if m.convoyScroll != 2 {
+		t.Errorf("convoyScroll = %d, want clamped to 2", m.convoyScroll)
+	}
+	if m.cursor != 0 {
+		t.Errorf("CONVOYS scroll moved agent cursor to %d, want 0", m.cursor)
+	}
+}
+
 func TestViewShowsTownAndHook(t *testing.T) {
 	m := New(nil)
 	snap := fixtureSnapshot()

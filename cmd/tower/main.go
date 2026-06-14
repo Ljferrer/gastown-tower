@@ -118,7 +118,35 @@ func printSnapshot(s tower.Snapshot) {
 				short(st.Model), st.Turns, st.ToolCalls, st.FileReads, activity)
 		}
 	}
+	printConvoys(s)
 	fmt.Println()
+}
+
+// printConvoys renders the convoys + merge-queue section of a text snapshot,
+// mirroring the TUI's CONVOYS panel.
+func printConvoys(s tower.Snapshot) {
+	if len(s.Convoys) == 0 && len(s.MergeQueue) == 0 {
+		return
+	}
+	fmt.Printf("\n▌ CONVOYS  (in-progress · landed 24h)\n")
+	for _, cv := range s.Convoys {
+		glyph := "○"
+		switch {
+		case cv.Status == "closed":
+			glyph = "✓"
+		case cv.Completed > 0:
+			glyph = "◐"
+		}
+		fmt.Printf("  %s %d/%d  %s\n", glyph, cv.Completed, cv.Total, strings.TrimPrefix(cv.Title, "Work: "))
+	}
+	fmt.Printf("  merge queue · %d pending\n", len(s.MergeQueue))
+	for _, mr := range s.MergeQueue {
+		id := mr.SourceIssue
+		if id == "" {
+			id = mr.ID
+		}
+		fmt.Printf("    ↳ %s  %s %s %s\n", id, mr.Rig, mr.Worker, mr.Status)
+	}
 }
 
 // bar renders a 5-cell context-fill meter.

@@ -207,6 +207,91 @@ func TestChurnStateMidTurnUsesTurnWindow(t *testing.T) {
 	}
 }
 
+// Convoys and the merge queue are part of the TTL-cached enrichment: fetched
+// once, reused within the TTL, and the merge-queue loader receives the rig set
+// derived from the routes prefixes loaded in the same pass.
+func TestFetchEnrichmentConvoysAndMQ(t *testing.T) {
+	clock := time.Unix(1_700_000_000, 0)
+	var convoyCalls, mqCalls int
+	var gotRigs []string
+	c := &Collector{
+		EnrichTTL:      15 * time.Second,
+		now:            func() time.Time { return clock },
+		loadReputation: func(string) (Reputation, error) { return Reputation{}, nil },
+		loadMail:       func(string) (Mail, error) { return Mail{}, nil },
+		loadHooks:      func(string) (map[string]string, error) { return nil, nil },
+		loadPrefixes: func(string) (map[string]string, error) {
+			return map[string]string{".": "hq", "GasTownTower": "gtt"}, nil
+		},
+		loadConvoys: func(string) ([]Convoy, error) {
+			convoyCalls++
+			return []Convoy{
+				{ID: "cv-open", Status: "open", CreatedAt: clock.Add(-time.Hour)},
+				{ID: "cv-stale", Status: "closed", CreatedAt: clock.Add(-48 * time.Hour)},
+			}, nil
+		},
+		loadMergeQueue: func(_ string, rigs []string) ([]MergeRequest, error) {
+			mqCalls++
+			gotRigs = rigs
+			return []MergeRequest{{ID: "mr1", Rig: "GasTownTower", SourceIssue: "gtt-9"}}, nil
+		},
+	}
+
+	en := c.fetchEnrichment(clock)
+	// recentConvoys must have dropped the stale closed convoy.
+	if len(en.convoys) != 1 || en.convoys[0].ID != "cv-open" {
+		t.Fatalf("convoys = %+v, want only cv-open", en.convoys)
+	}
+	if len(en.mergeQueue) != 1 || en.mergeQueue[0].SourceIssue != "gtt-9" {
+		t.Fatalf("mergeQueue = %+v", en.mergeQueue)
+	}
+	if len(gotRigs) != 1 || gotRigs[0] != "GasTownTower" {
+		t.Fatalf("mq loader rigs = %v, want [GasTownTower]", gotRigs)
+	}
+
+	// Within TTL: no re-fetch.
+	clock = clock.Add(14 * time.Second)
+	c.fetchEnrichment(clock)
+	if convoyCalls != 1 || mqCalls != 1 {
+		t.Fatalf("re-fetched within TTL: convoy=%d mq=%d", convoyCalls, mqCalls)
+	}
+	// Past TTL: exactly one re-fetch.
+	clock = clock.Add(2 * time.Second)
+	c.fetchEnrichment(clock)
+	if convoyCalls != 2 || mqCalls != 2 {
+		t.Fatalf("expected one re-fetch after TTL: convoy=%d mq=%d", convoyCalls, mqCalls)
+	}
+}
+
+// A failing convoy/MQ loader must not abort enrichment — other data still
+// populates and the cache timestamp still advances.
+func TestFetchEnrichmentConvoyBestEffort(t *testing.T) {
+	clock := time.Unix(1_700_000_000, 0)
+	c := &Collector{
+		EnrichTTL:      15 * time.Second,
+		now:            func() time.Time { return clock },
+		loadReputation: func(string) (Reputation, error) { return Reputation{}, nil },
+		loadMail:       func(string) (Mail, error) { return Mail{Total: 2}, nil },
+		loadHooks:      func(string) (map[string]string, error) { return nil, nil },
+		loadConvoys: func(string) ([]Convoy, error) {
+			return nil, errors.New("gt convoy down")
+		},
+		loadMergeQueue: func(string, []string) ([]MergeRequest, error) {
+			return nil, errors.New("gt mq down")
+		},
+	}
+	en := c.fetchEnrichment(clock)
+	if en.town.Mail.Total != 2 {
+		t.Errorf("mail should populate despite convoy/mq failure, got %+v", en.town.Mail)
+	}
+	if len(en.convoys) != 0 || len(en.mergeQueue) != 0 {
+		t.Errorf("failed loaders should leave empty data, got %+v / %+v", en.convoys, en.mergeQueue)
+	}
+	if c.enrichAt.IsZero() {
+		t.Error("cache timestamp should advance even when convoy/mq loaders fail")
+	}
+}
+
 // A failing loader must not abort enrichment — the others still populate, and
 // the timestamp still advances so we don't hammer the failing command.
 func TestFetchEnrichmentBestEffort(t *testing.T) {

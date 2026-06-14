@@ -50,16 +50,21 @@ type Snapshot struct {
 	Town        TownStatus
 	Stats       TownStats
 	Groups      []Group
-	Events      []Event // town flow log, newest-first (ring-windowed)
+	Events      []Event        // town flow log, newest-first (ring-windowed)
+	Convoys     []Convoy       // in-progress + recently-landed town work
+	MergeQueue  []MergeRequest // pending merges across all rigs
 }
 
-// enrichment bundles the slow-changing town-level data (reputation, mail, and
-// per-assignee hooks) fetched by shelling out to gt/bd. It is TTL-cached so the
-// fast transcript refresh never pays the shell-out cost.
+// enrichment bundles the slow-changing town-level data (reputation, mail,
+// per-assignee hooks, convoys, and merge queue) fetched by shelling out to
+// gt/bd. It is TTL-cached so the fast transcript refresh never pays the
+// shell-out cost.
 type enrichment struct {
-	town     TownStatus
-	hooks    map[string]string // assignee -> "id: title"
-	prefixes map[string]string // rig path -> tmux session prefix (from routes.jsonl)
+	town       TownStatus
+	hooks      map[string]string // assignee -> "id: title"
+	prefixes   map[string]string // rig path -> tmux session prefix (from routes.jsonl)
+	convoys    []Convoy
+	mergeQueue []MergeRequest
 }
 
 // Collector reads the live town's artifacts (transcripts, and later gt/bd) and
@@ -79,6 +84,8 @@ type Collector struct {
 	loadMail       func(townRoot string) (Mail, error)
 	loadHooks      func(townRoot string) (map[string]string, error)
 	loadPrefixes   func(townRoot string) (map[string]string, error)
+	loadConvoys    func(townRoot string) ([]Convoy, error)
+	loadMergeQueue func(townRoot string, rigs []string) ([]MergeRequest, error)
 
 	// Liveness probes (injectable in tests); default to real tmux shell-outs.
 	// Best-effort — failures degrade churn detection to the mtime heuristic.
@@ -112,6 +119,8 @@ func NewCollector(townRoot string) *Collector {
 		loadMail:       loadMail,
 		loadHooks:      loadHooks,
 		loadPrefixes:   loadSessionPrefixes,
+		loadConvoys:    loadConvoys,
+		loadMergeQueue: loadMergeQueue,
 		listSessions:   func() (map[string]struct{}, error) { return listTmuxSessions(socket) },
 		capturePane:    func(session string) (string, error) { return capturePane(socket, session) },
 	}
@@ -166,6 +175,8 @@ func (c *Collector) Snapshot() (Snapshot, error) {
 
 	snap := assemble(byGroup, now)
 	snap.Town = en.town
+	snap.Convoys = en.convoys
+	snap.MergeQueue = en.mergeQueue
 	for gi := range snap.Groups {
 		for ai := range snap.Groups[gi].Agents {
 			a := &snap.Groups[gi].Agents[ai]
@@ -200,6 +211,16 @@ func (c *Collector) fetchEnrichment(now time.Time) enrichment {
 	if c.loadPrefixes != nil {
 		if prefixes, err := c.loadPrefixes(c.TownRoot); err == nil {
 			en.prefixes = prefixes
+		}
+	}
+	if c.loadConvoys != nil {
+		if convoys, err := c.loadConvoys(c.TownRoot); err == nil {
+			en.convoys = recentConvoys(convoys, now, 24*time.Hour)
+		}
+	}
+	if c.loadMergeQueue != nil {
+		if mq, err := c.loadMergeQueue(c.TownRoot, rigNames(en.prefixes)); err == nil {
+			en.mergeQueue = mq
 		}
 	}
 	c.enrich, c.enrichAt = en, now
