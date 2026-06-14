@@ -94,6 +94,118 @@ func TestRenderTown(t *testing.T) {
 	}
 }
 
+func TestTabSwitchesFocus(t *testing.T) {
+	m := newWithSnap()
+	if m.focus != panelAgents {
+		t.Fatalf("default focus = %v, want panelAgents", m.focus)
+	}
+	for _, want := range []panel{panelConvoys, panelEvents, panelAgents} {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+		m = next.(Model)
+		if m.focus != want {
+			t.Fatalf("after tab, focus = %v, want %v", m.focus, want)
+		}
+	}
+	// shift+tab walks the other way.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = next.(Model)
+	if m.focus != panelEvents {
+		t.Fatalf("after shift+tab, focus = %v, want panelEvents", m.focus)
+	}
+}
+
+func TestViewRendersAllPanels(t *testing.T) {
+	m := newWithSnap()
+	out := m.View()
+	for _, want := range []string{"AGENTS", "CONVOYS", "EVENTS"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("View() missing panel header %q", want)
+		}
+	}
+	// Agents panel is focused by default; its header carries the focus marker.
+	if !strings.Contains(out, "▌ AGENTS") {
+		t.Errorf("focused AGENTS header missing focus marker:\n%s", out)
+	}
+	// Focus the convoys panel and confirm the marker moves.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(Model)
+	out = m.View()
+	if !strings.Contains(out, "▌ CONVOYS") {
+		t.Errorf("focused CONVOYS header missing focus marker:\n%s", out)
+	}
+	if strings.Contains(out, "▌ AGENTS") {
+		t.Errorf("AGENTS header should no longer be focused:\n%s", out)
+	}
+}
+
+func TestScrollRoutedByFocus(t *testing.T) {
+	m := newWithSnap()
+	// While AGENTS is focused, j moves the agent cursor.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m = next.(Model)
+	if m.cursor != 1 {
+		t.Fatalf("j with AGENTS focus: cursor = %d, want 1", m.cursor)
+	}
+	// Focus a non-agents panel; j must NOT move the agent cursor.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(Model)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	m = next.(Model)
+	if m.cursor != 1 {
+		t.Fatalf("k with CONVOYS focus moved agent cursor to %d, want 1", m.cursor)
+	}
+}
+
+func TestEnterExpandsOnlyWhenAgentsFocused(t *testing.T) {
+	m := newWithSnap()
+	// Focus events, then enter — must not expand any agent.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(Model)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(Model)
+	if m.focus != panelEvents {
+		t.Fatalf("setup: focus = %v, want panelEvents", m.focus)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if len(m.expanded) != 0 {
+		t.Fatalf("enter with EVENTS focus expanded an agent: %v", m.expanded)
+	}
+}
+
+func TestSearchFiltersAgents(t *testing.T) {
+	m := newWithSnap()
+	if len(m.agents) != 2 {
+		t.Fatalf("setup: %d agents", len(m.agents))
+	}
+	// Enter search and type "wit" — only the witness should remain.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m = next.(Model)
+	if !m.searching {
+		t.Fatal("'/' did not enter search mode")
+	}
+	for _, r := range "wit" {
+		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = next.(Model)
+	}
+	if len(m.agents) != 1 || m.agents[0].Name != "witness" {
+		t.Fatalf("search 'wit' filtered to %d agents %v, want [witness]", len(m.agents), m.agents)
+	}
+	out := m.View()
+	if !strings.Contains(out, "wit") {
+		t.Errorf("search query not shown in view:\n%s", out)
+	}
+	// esc clears the filter and restores all agents.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if m.searching {
+		t.Fatal("esc did not exit search mode")
+	}
+	if len(m.agents) != 2 {
+		t.Fatalf("esc did not clear filter: %d agents", len(m.agents))
+	}
+}
+
 func TestViewShowsTownAndHook(t *testing.T) {
 	m := New(nil)
 	snap := fixtureSnapshot()

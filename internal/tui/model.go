@@ -18,17 +18,33 @@ type snapMsg struct {
 	err  error
 }
 
+// panel identifies one of the stacked panels in the cockpit. The focused panel
+// receives j/k scroll and enter; tab cycles focus across all of them.
+type panel int
+
+const (
+	panelAgents  panel = iota // grouped agents (town / rigs) — fully populated
+	panelConvoys              // convoys + merge queue — data lands in a later phase
+	panelEvents               // curated event stream — data lands in a later phase
+	panelCount
+)
+
 // Model is the Bubble Tea model for the live Tower.
 type Model struct {
-	c        *tower.Collector
-	snap     tower.Snapshot
-	agents   []tower.Agent // flattened in display order, for cursor navigation
-	cursor   int
-	expanded map[string]bool
-	width    int
-	height   int
-	err      error
-	interval time.Duration
+	c            *tower.Collector
+	snap         tower.Snapshot
+	agents       []tower.Agent // flattened (and search-filtered) display order
+	cursor       int           // selected agent within the AGENTS panel
+	expanded     map[string]bool
+	focus        panel  // which panel receives scroll/enter
+	query        string // active search filter ("" = no filter)
+	searching    bool   // true while the user is typing a search query
+	convoyScroll int
+	eventScroll  int
+	width        int
+	height       int
+	err          error
+	interval     time.Duration
 }
 
 // New builds a Model that refreshes from the given collector.
@@ -61,23 +77,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case snapMsg:
 		m.snap, m.err = msg.snap, msg.err
 		m.flatten()
-		if m.cursor >= len(m.agents) {
-			m.cursor = max(0, len(m.agents)-1)
-		}
+		m.clampCursor()
 	case tea.KeyMsg:
+		if m.searching {
+			return m.updateSearch(msg)
+		}
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "tab":
+			m.focus = (m.focus + 1) % panelCount
+		case "shift+tab":
+			m.focus = (m.focus + panelCount - 1) % panelCount
+		case "/":
+			m.searching = true
 		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
-			}
+			m.scroll(-1)
 		case "down", "j":
-			if m.cursor < len(m.agents)-1 {
-				m.cursor++
-			}
+			m.scroll(+1)
 		case "enter", " ":
-			if m.cursor < len(m.agents) {
+			if m.focus == panelAgents && m.cursor < len(m.agents) {
 				k := agentKey(m.agents[m.cursor])
 				m.expanded[k] = !m.expanded[k]
 			}
@@ -88,12 +107,90 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// updateSearch handles key input while the search prompt is active.
+func (m Model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEnter:
+		m.searching = false // commit: keep the filter applied
+	case tea.KeyEsc:
+		m.searching = false
+		m.query = ""
+		m.flatten()
+		m.clampCursor()
+	case tea.KeyBackspace, tea.KeyDelete:
+		if r := []rune(m.query); len(r) > 0 {
+			m.query = string(r[:len(r)-1])
+			m.flatten()
+			m.clampCursor()
+		}
+	case tea.KeyRunes, tea.KeySpace:
+		m.query += string(msg.Runes)
+		m.flatten()
+		m.clampCursor()
+	}
+	return m, nil
+}
+
+// scroll moves the selection/viewport of the focused panel by delta.
+func (m *Model) scroll(delta int) {
+	switch m.focus {
+	case panelAgents:
+		m.cursor = clampScroll(m.cursor+delta, len(m.agents))
+	case panelConvoys:
+		m.convoyScroll = clampScroll(m.convoyScroll+delta, convoyCount(m.snap))
+	case panelEvents:
+		m.eventScroll = clampScroll(m.eventScroll+delta, eventCount(m.snap))
+	}
+}
+
+// clampScroll keeps an index within [0, n) (and at 0 when the list is empty).
+func clampScroll(i, n int) int {
+	if i < 0 || n == 0 {
+		return 0
+	}
+	if i >= n {
+		return n - 1
+	}
+	return i
+}
+
+func (m *Model) clampCursor() {
+	if m.cursor >= len(m.agents) {
+		m.cursor = max(0, len(m.agents)-1)
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+}
+
 func (m *Model) flatten() {
 	m.agents = m.agents[:0]
 	for _, g := range m.snap.Groups {
-		m.agents = append(m.agents, g.Agents...)
+		for _, a := range g.Agents {
+			if m.matches(a) {
+				m.agents = append(m.agents, a)
+			}
+		}
 	}
 }
+
+// matches reports whether an agent passes the active search filter. An empty
+// query matches everything. Matching is case-insensitive across the agent's
+// identity and current activity.
+func (m Model) matches(a tower.Agent) bool {
+	if m.query == "" {
+		return true
+	}
+	hay := strings.ToLower(strings.Join(
+		[]string{a.Name, a.Role, a.Group, a.Rig, a.Stats.NowDoing, a.Hook}, " "))
+	return strings.Contains(hay, strings.ToLower(m.query))
+}
+
+// convoyCount and eventCount report how many rows each panel currently has.
+// These data sources arrive in later phases (gtt-975.4 / gtt-975.5); until then
+// the panels are empty but the focus/scroll machinery is wired and tested.
+func convoyCount(tower.Snapshot) int { return 0 }
+func eventCount(tower.Snapshot) int  { return 0 }
 
 // ---- styling ----
 
@@ -103,6 +200,7 @@ var (
 	helpStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	churnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#5ad17a")) // green
 	selBar     = lipgloss.NewStyle().Foreground(lipgloss.Color(tower.TownColor)).Bold(true)
+	panelStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("250"))
 )
 
 // View implements tea.Model. It is pure (no TTY needed) so it is unit-testable.
@@ -115,29 +213,87 @@ func (m Model) View() string {
 	if town := renderTown(m.snap.Town); town != "" {
 		b.WriteString(town + "\n")
 	}
+	if line := m.renderSearch(); line != "" {
+		b.WriteString(line + "\n")
+	}
 
 	if m.err != nil {
 		b.WriteString("\n  " + dimStyle.Render("error: "+m.err.Error()) + "\n")
 	}
-	if len(m.agents) == 0 {
-		b.WriteString("\n  " + dimStyle.Render("no active agents") + "\n")
-	}
 
+	b.WriteString(m.renderAgentsPanel())
+	b.WriteString(m.renderConvoysPanel())
+	b.WriteString(m.renderEventsPanel())
+
+	b.WriteString("\n" + helpStyle.Render("tab focus · j/k scroll · enter expand · / search · q quit") + "\n")
+	return b.String()
+}
+
+// panelHeader renders a stacked-panel divider. The focused panel is marked with
+// a leading bar ("▌ TITLE") so the operator can see where tab/j/k land.
+func panelHeader(title, subtitle string, focused bool) string {
+	marker := "  "
+	style := panelStyle
+	if focused {
+		marker = "▌ "
+		style = selBar
+	}
+	head := style.Render(marker + title)
+	if subtitle != "" {
+		head += " " + dimStyle.Render(subtitle)
+	}
+	return "\n" + head + "\n"
+}
+
+func (m Model) renderSearch() string {
+	switch {
+	case m.searching:
+		return "  " + dimStyle.Render("search: ") + m.query + selBar.Render("▏")
+	case m.query != "":
+		return "  " + dimStyle.Render(fmt.Sprintf("filter: %q (esc to clear)", m.query))
+	}
+	return ""
+}
+
+func (m Model) renderAgentsPanel() string {
+	var b strings.Builder
+	b.WriteString(panelHeader("AGENTS", "town / rigs", m.focus == panelAgents))
+	if len(m.agents) == 0 {
+		b.WriteString("  " + dimStyle.Render("no active agents") + "\n")
+		return b.String()
+	}
 	idx := 0
 	for _, g := range m.snap.Groups {
 		gc := lipgloss.Color(tower.GroupColor(g.Name))
-		head := lipgloss.NewStyle().Foreground(gc).Bold(true).Render("▌ " + g.Name)
-		b.WriteString("\n" + head + "\n")
+		var rows strings.Builder
 		for _, a := range g.Agents {
-			b.WriteString(renderAgent(a, idx == m.cursor, gc))
+			if !m.matches(a) {
+				continue
+			}
+			rows.WriteString(renderAgent(a, idx == m.cursor, gc))
 			if m.expanded[agentKey(a)] {
-				b.WriteString(renderExpanded(a))
+				rows.WriteString(renderExpanded(a))
 			}
 			idx++
 		}
+		if rows.Len() == 0 {
+			continue // every agent in this group filtered out
+		}
+		head := lipgloss.NewStyle().Foreground(gc).Bold(true).Render("▌ " + g.Name)
+		b.WriteString(head + "\n")
+		b.WriteString(rows.String())
 	}
-	b.WriteString("\n" + helpStyle.Render("↑/↓ move · enter expand · r refresh · q quit") + "\n")
 	return b.String()
+}
+
+func (m Model) renderConvoysPanel() string {
+	b := panelHeader("CONVOYS", "in-progress · landed 24h", m.focus == panelConvoys)
+	return b + "  " + dimStyle.Render("(no convoy data yet)") + "\n"
+}
+
+func (m Model) renderEventsPanel() string {
+	b := panelHeader("EVENTS", "curated flow, newest-first", m.focus == panelEvents)
+	return b + "  " + dimStyle.Render("(no event data yet)") + "\n"
 }
 
 // renderTown formats the town-status line: mail envelope with unread/total and
