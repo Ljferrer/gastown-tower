@@ -171,6 +171,18 @@ func (c *Collector) Snapshot() (Snapshot, error) {
 		if !ok {
 			continue
 		}
+		// Liveness gates presence. After a bulk `gt down`, transcripts keep
+		// fresh mtimes while the tmux sessions are gone; without this gate the
+		// mtime heuristic below would paint dead agents active (and even busy)
+		// for up to ActiveWindow. When the live-session query succeeded and this
+		// agent's resolved session is absent, it is provably dead — drop it
+		// entirely so it leaves both the Active and busy counts. A nil session
+		// set (tmux hiccup) or an unresolvable rig leaves deadness unproven and
+		// falls through to the mtime path, so a transient failure never blanks
+		// the tower.
+		if provablyDead(ref, en.prefixes, sessions) {
+			continue
+		}
 		tx, mt, ok := latestTranscript(filepath.Join(c.ProjectsDir, e.Name()))
 		if !ok || now.Sub(mt) > c.ActiveWindow {
 			continue
@@ -244,6 +256,25 @@ func (c *Collector) fetchEnrichment(now time.Time) enrichment {
 	}
 	c.enrich, c.enrichAt = en, now
 	return en
+}
+
+// provablyDead reports whether the live tmux session set proves this agent's
+// session is gone, so presence can exclude it. It is true only when all three
+// hold: the tmux query SUCCEEDED (non-nil set), the agent's session name
+// RESOLVES (known rig), and that name is ABSENT from the set. A nil set (tmux
+// hiccup) or an unresolvable rig leaves deadness unproven — the caller keeps the
+// mtime fallback so a transient probe failure or an unmapped rig never blanks
+// the tower.
+func provablyDead(ref AgentRef, prefixes map[string]string, sessions map[string]struct{}) bool {
+	if sessions == nil {
+		return false // tmux query failed; deadness unprovable
+	}
+	name, ok := tmuxSession(ref, prefixes)
+	if !ok {
+		return false // unknown rig; can't resolve a session name to check
+	}
+	_, live := sessions[name]
+	return !live
 }
 
 // agentStatus classifies an agent as idle, churning, or awaiting-overseer and,

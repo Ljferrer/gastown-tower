@@ -2,6 +2,8 @@ package tower
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -273,6 +275,145 @@ func TestAgentStatusAwaitingFallback(t *testing.T) {
 	if status, _ := c.agentStatus(mayor, prefixes, noSessions, decayed, now, TranscriptStats{PendingAsk: true}); status != StatusIdle {
 		t.Errorf("decayed pending-ask should read idle, got %v", status)
 	}
+}
+
+// provablyDead is the liveness gate that decides presence: an agent is provably
+// dead only when the tmux query SUCCEEDED (non-nil set), its session name
+// RESOLVES (known rig), and that name is ABSENT from the set. A nil set (tmux
+// hiccup) or an unresolvable rig leaves deadness unproven so the caller keeps
+// the mtime fallback.
+func TestProvablyDead(t *testing.T) {
+	prefixes := map[string]string{".": "hq", "GigaClip": "gc"}
+	mayor := AgentRef{Name: "mayor", Group: townGroup}                       // -> hq-mayor
+	polecat := AgentRef{Name: "furiosa", Rig: "GigaClip", Group: "GigaClip"} // -> gc-furiosa
+	unknown := AgentRef{Name: "x", Rig: "Nope", Group: "Nope"}               // unresolvable
+
+	tests := []struct {
+		name     string
+		ref      AgentRef
+		sessions map[string]struct{}
+		want     bool
+	}{
+		{"non-nil set omits session -> dead", polecat, map[string]struct{}{"gc-other": {}}, true},
+		{"empty non-nil set -> dead", polecat, map[string]struct{}{}, true},
+		{"session present -> alive", polecat, map[string]struct{}{"gc-furiosa": {}}, false},
+		{"nil set (tmux hiccup) -> not provable", polecat, nil, false},
+		{"unknown rig -> not provable", unknown, map[string]struct{}{}, false},
+		{"town agent omitted -> dead", mayor, map[string]struct{}{"hq-other": {}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := provablyDead(tt.ref, prefixes, tt.sessions); got != tt.want {
+				t.Errorf("provablyDead = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// writeTranscriptDir creates a project transcript dir for an agent at the given
+// relative path segments (below the town slug) with a single fresh *.jsonl, so
+// Snapshot discovers it. Returns nothing; fails the test on error.
+func writeTranscriptDir(t *testing.T, projectsDir, townSlug, relName string) {
+	t.Helper()
+	dir := filepath.Join(projectsDir, townSlug+"-"+relName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "session.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Liveness gates PRESENCE: after a bulk `gt down`, transcripts keep fresh mtimes
+// but the sessions are gone. A non-nil live set that omits an agent's resolved
+// tmux session must drop that agent from Active/busy. A nil set (tmux hiccup) or
+// an unresolvable rig preserves the pure mtime fallback so a transient failure
+// never blanks the tower.
+func TestSnapshotDropsDeadAgents(t *testing.T) {
+	townRoot := "/town"
+	townSlug := slugify(townRoot)
+	prefixes := map[string]string{"GigaClip": "gc"}
+
+	newCollector := func(projectsDir string, sessions map[string]struct{}) *Collector {
+		return &Collector{
+			TownRoot:       townRoot,
+			ProjectsDir:    projectsDir,
+			ChurnWindow:    8 * time.Second,
+			TurnWindow:     5 * time.Minute,
+			ActiveWindow:   30 * time.Minute,
+			EnrichTTL:      15 * time.Second,
+			now:            time.Now,
+			loadReputation: func(string) (Reputation, error) { return Reputation{}, nil },
+			loadMail:       func(string) (Mail, error) { return Mail{}, nil },
+			loadHooks:      func(string) (map[string]string, error) { return nil, nil },
+			loadPrefixes:   func(string) (map[string]string, error) { return prefixes, nil },
+			listSessions:   func() (map[string]struct{}, error) { return sessions, nil },
+			capturePane:    func(string) (string, error) { return "", errors.New("no pane") },
+		}
+	}
+
+	// A live set that includes only gc-alive: gc-dead is provably gone.
+	t.Run("non-nil set omitting a session drops it from Active", func(t *testing.T) {
+		dir := t.TempDir()
+		writeTranscriptDir(t, dir, townSlug, "GigaClip-polecats-alive")
+		writeTranscriptDir(t, dir, townSlug, "GigaClip-polecats-dead")
+		c := newCollector(dir, map[string]struct{}{"gc-alive": {}})
+		snap, err := c.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snap.Stats.Active != 1 {
+			t.Errorf("Active = %d, want 1 (dead agent must be dropped)", snap.Stats.Active)
+		}
+		if snap.Stats.Churning != 1 {
+			t.Errorf("Churning = %d, want 1 (only the live agent)", snap.Stats.Churning)
+		}
+	})
+
+	// nil session set (tmux query failed) -> both agents kept via mtime fallback.
+	t.Run("nil set preserves the mtime fallback", func(t *testing.T) {
+		dir := t.TempDir()
+		writeTranscriptDir(t, dir, townSlug, "GigaClip-polecats-alive")
+		writeTranscriptDir(t, dir, townSlug, "GigaClip-polecats-dead")
+		c := newCollector(dir, nil)
+		snap, err := c.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snap.Stats.Active != 2 {
+			t.Errorf("Active = %d, want 2 (nil set must not drop anyone)", snap.Stats.Active)
+		}
+	})
+
+	// Unknown rig (no prefix) -> session name unresolvable -> kept on mtime path.
+	t.Run("unknown rig stays on the mtime path", func(t *testing.T) {
+		dir := t.TempDir()
+		writeTranscriptDir(t, dir, townSlug, "Ghost-polecats-spectre")
+		c := newCollector(dir, map[string]struct{}{}) // non-nil, but rig unknown
+		snap, err := c.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snap.Stats.Active != 1 {
+			t.Errorf("Active = %d, want 1 (unknown rig must stay on mtime path)", snap.Stats.Active)
+		}
+	})
+
+	// Bulk-down regression: many fresh transcripts + empty non-nil live set -> 0 active.
+	t.Run("bulk down with empty live set yields 0 active", func(t *testing.T) {
+		dir := t.TempDir()
+		for _, name := range []string{"a", "b", "c", "d", "e"} {
+			writeTranscriptDir(t, dir, townSlug, "GigaClip-polecats-"+name)
+		}
+		c := newCollector(dir, map[string]struct{}{}) // tmux succeeded; nothing alive
+		snap, err := c.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snap.Stats.Active != 0 {
+			t.Errorf("Active = %d, want 0 (all sessions dead after gt down --all)", snap.Stats.Active)
+		}
+	})
 }
 
 // Convoys and the merge queue are part of the TTL-cached enrichment: fetched
