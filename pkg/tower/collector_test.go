@@ -94,7 +94,7 @@ func TestChurnStateFromPane(t *testing.T) {
 
 	// Working pane overrides a stale mtime.
 	c.capturePane = func(string) (string, error) { return working, nil }
-	churning, tp := c.churnState(ref, prefixes, sessions, staleMtime, now)
+	churning, tp := c.churnState(ref, prefixes, sessions, staleMtime, now, false)
 	if !churning {
 		t.Error("working pane with stale mtime should read as churning")
 	}
@@ -104,13 +104,14 @@ func TestChurnStateFromPane(t *testing.T) {
 
 	// Idle pane overrides a fresh mtime.
 	c.capturePane = func(string) (string, error) { return idle, nil }
-	if churning, _ := c.churnState(ref, prefixes, sessions, freshMtime, now); churning {
+	if churning, _ := c.churnState(ref, prefixes, sessions, freshMtime, now, false); churning {
 		t.Error("idle pane with fresh mtime should read as idle")
 	}
 }
 
 // When no pane is available (unknown rig, dead session, or capture error), churn
-// falls back to the transcript-mtime heuristic.
+// falls back to the transcript heuristic. A completed turn (midTurn=false) uses
+// the short ChurnWindow quiet window.
 func TestChurnStateFallsBackToMtime(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	fresh := now.Add(-2 * time.Second)
@@ -120,22 +121,55 @@ func TestChurnStateFallsBackToMtime(t *testing.T) {
 
 	c := &Collector{
 		ChurnWindow: 8 * time.Second,
+		TurnWindow:  5 * time.Minute,
 		capturePane: func(string) (string, error) { return "", errors.New("no pane") },
 	}
 
 	// Session not in the live set -> mtime fallback (fresh = churning).
-	if churning, _ := c.churnState(ref, prefixes, map[string]struct{}{}, fresh, now); !churning {
+	if churning, _ := c.churnState(ref, prefixes, map[string]struct{}{}, fresh, now, false); !churning {
 		t.Error("missing session with fresh mtime should fall back to churning")
 	}
 	// Capture error -> mtime fallback (stale = idle).
 	sessions := map[string]struct{}{"hq-mayor": {}}
-	if churning, _ := c.churnState(ref, prefixes, sessions, stale, now); churning {
+	if churning, _ := c.churnState(ref, prefixes, sessions, stale, now, false); churning {
 		t.Error("capture error with stale mtime should fall back to idle")
 	}
 	// Unknown rig (no prefix) -> mtime fallback.
 	ghost := AgentRef{Name: "x", Rig: "Nope", Group: "Nope"}
-	if churning, _ := c.churnState(ghost, prefixes, sessions, fresh, now); !churning {
+	if churning, _ := c.churnState(ghost, prefixes, sessions, fresh, now, false); !churning {
 		t.Error("unknown rig with fresh mtime should fall back to churning")
+	}
+}
+
+// A mid-turn transcript (long generation, blocking tool call, inter-turn wait)
+// goes quiet on disk while the agent is busy. With no pane, the fallback must
+// honor the longer TurnWindow so such an agent stays churning past the short
+// ChurnWindow, while a session that has been quiet beyond TurnWindow still drops.
+func TestChurnStateMidTurnUsesTurnWindow(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	prefixes := map[string]string{".": "hq"}
+	ref := AgentRef{Name: "mayor", Group: townGroup}
+	sessions := map[string]struct{}{"hq-mayor": {}}
+
+	c := &Collector{
+		ChurnWindow: 8 * time.Second,
+		TurnWindow:  5 * time.Minute,
+		capturePane: func(string) (string, error) { return "", errors.New("no pane") },
+	}
+
+	// Quiet for 1 minute: past ChurnWindow but mid-turn -> churning.
+	midGen := now.Add(-1 * time.Minute)
+	if churning, _ := c.churnState(ref, prefixes, sessions, midGen, now, true); !churning {
+		t.Error("mid-turn agent quiet within TurnWindow should read as churning")
+	}
+	// Same staleness with a completed turn -> idle (only TurnWindow rescues it).
+	if churning, _ := c.churnState(ref, prefixes, sessions, midGen, now, false); churning {
+		t.Error("completed turn beyond ChurnWindow should read as idle")
+	}
+	// Mid-turn but quiet beyond TurnWindow (likely a dead session) -> idle.
+	dead := now.Add(-6 * time.Minute)
+	if churning, _ := c.churnState(ref, prefixes, sessions, dead, now, true); churning {
+		t.Error("mid-turn quiet beyond TurnWindow should read as idle")
 	}
 }
 

@@ -20,6 +20,7 @@ type TranscriptStats struct {
 	FileReads     int    // tool_use blocks with name == "Read"
 	Turns         int    // assistant messages
 	NowDoing      string // humanized latest tool_use (or last assistant text)
+	MidTurn       bool   // last conversation message awaits a reply (agent is busy)
 }
 
 // scanLimit is the max single-line size we accept from a transcript. Attachment
@@ -100,7 +101,19 @@ func processLine(line []byte, s *TranscriptStats, lastUsage **tUsage, lastTool *
 		return
 	}
 	m := rec.Message
-	if rec.Type != "assistant" {
+	// Track whether the latest conversation message leaves the agent mid-turn.
+	// A user message (prompt or tool_result) always awaits an assistant reply.
+	// An assistant message is mid-turn only when it dispatched a tool and awaits
+	// the result — i.e. it carries a tool_use block (set in the block scan
+	// below); a terminal text-only turn ends it. Metadata records (attachment,
+	// mode, …) carry no message and never reach here.
+	switch rec.Type {
+	case "user":
+		s.MidTurn = true
+		return
+	case "assistant":
+		s.MidTurn = false // set true below if this turn dispatched a tool
+	default:
 		return
 	}
 	s.Turns++
@@ -120,6 +133,7 @@ func processLine(line []byte, s *TranscriptStats, lastUsage **tUsage, lastTool *
 		switch b.Type {
 		case "tool_use":
 			s.ToolCalls++
+			s.MidTurn = true // awaiting this tool's result
 			if b.Name == "Read" {
 				s.FileReads++
 			}

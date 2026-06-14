@@ -47,7 +47,8 @@ type enrichment struct {
 type Collector struct {
 	TownRoot     string
 	ProjectsDir  string
-	ChurnWindow  time.Duration // mtime-fallback window when no pane is available
+	ChurnWindow  time.Duration // mtime-fallback quiet window after a completed turn
+	TurnWindow   time.Duration // mtime-fallback window while the transcript is mid-turn
 	ActiveWindow time.Duration // ignore sessions idle longer than this
 	EnrichTTL    time.Duration // how long town/hook enrichment is cached
 	now          func() time.Time
@@ -81,6 +82,7 @@ func NewCollector(townRoot string) *Collector {
 		TownRoot:       townRoot,
 		ProjectsDir:    filepath.Join(home, ".claude", "projects"),
 		ChurnWindow:    8 * time.Second,
+		TurnWindow:     5 * time.Minute,
 		ActiveWindow:   30 * time.Minute,
 		EnrichTTL:      15 * time.Second,
 		now:            time.Now,
@@ -128,7 +130,7 @@ func (c *Collector) Snapshot() (Snapshot, error) {
 		if err != nil {
 			continue
 		}
-		churning, turn := c.churnState(ref, en.prefixes, sessions, mt, now)
+		churning, turn := c.churnState(ref, en.prefixes, sessions, mt, now, stats.MidTurn)
 		byGroup[ref.Group] = append(byGroup[ref.Group], Agent{
 			AgentRef:       ref,
 			TranscriptPath: tx,
@@ -186,8 +188,17 @@ func (c *Collector) fetchEnrichment(now time.Time) enrichment {
 // working-marker means mid-turn regardless of transcript mtime (a long
 // generate writes nothing to disk until it completes). When no pane is
 // available — unknown rig, dead session, capture failure, or tmux missing — it
-// falls back to the transcript-mtime heuristic.
-func (c *Collector) churnState(ref AgentRef, prefixes map[string]string, sessions map[string]struct{}, mt, now time.Time) (bool, TurnProgress) {
+// falls back to the transcript heuristic.
+//
+// The fallback can't see a long generation or a blocking tool call directly:
+// the transcript is written at turn boundaries, so mtime goes quiet exactly
+// when the agent is busiest. midTurn (the last conversation message still
+// awaits a reply) recovers that signal, granting the longer TurnWindow so a
+// mid-turn agent stays churning across a realistic turn/tool duration. A
+// completed turn uses the shorter ChurnWindow quiet window. Either window
+// bounds the lie for a session that died mid-turn; ActiveWindow is the outer
+// cap that drops it entirely.
+func (c *Collector) churnState(ref AgentRef, prefixes map[string]string, sessions map[string]struct{}, mt, now time.Time, midTurn bool) (bool, TurnProgress) {
 	if name, ok := tmuxSession(ref, prefixes); ok && c.capturePane != nil {
 		if _, live := sessions[name]; live {
 			if pane, err := c.capturePane(name); err == nil {
@@ -196,7 +207,11 @@ func (c *Collector) churnState(ref AgentRef, prefixes map[string]string, session
 			}
 		}
 	}
-	return now.Sub(mt) <= c.ChurnWindow, TurnProgress{}
+	window := c.ChurnWindow
+	if midTurn {
+		window = c.TurnWindow
+	}
+	return now.Sub(mt) <= window, TurnProgress{}
 }
 
 // latestTranscript returns the most-recently-modified *.jsonl in dir.

@@ -36,6 +36,38 @@ func TestParseTranscript(t *testing.T) {
 	if s.NowDoing != "read window.go" { // latest tool_use was a Read
 		t.Errorf("NowDoing=%q, want %q", s.NowDoing, "read window.go")
 	}
+	if !s.MidTurn { // fixture ends on an assistant tool_use awaiting its result
+		t.Error("MidTurn=false, want true (last turn dispatched a tool)")
+	}
+}
+
+// MidTurn tracks whether the final conversation message leaves the agent busy:
+// a tool_use or a user message is mid-turn; a terminal text-only assistant turn
+// is not. Trailing metadata records must not disturb the verdict.
+func TestParseTranscriptMidTurn(t *testing.T) {
+	const userBlock = `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"go"}]}}`
+	const toolUse = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"sleep 60"}}]}}`
+	const terminal = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"all done"}]}}`
+	const meta = `{"type":"permission-mode"}`
+
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"ends on user message (awaiting reply)", userBlock, true},
+		{"ends on tool_use (blocking tool call)", userBlock + "\n" + toolUse, true},
+		{"ends on terminal text turn", userBlock + "\n" + toolUse + "\n" + terminal, false},
+		{"trailing metadata ignored", userBlock + "\n" + toolUse + "\n" + meta, true},
+		{"terminal turn then metadata", terminal + "\n" + meta, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseTranscript(strings.NewReader(tc.body)).MidTurn; got != tc.want {
+				t.Errorf("MidTurn=%v, want %v", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestHumanizeActivity(t *testing.T) {
