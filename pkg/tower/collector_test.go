@@ -30,6 +30,40 @@ func TestAssembleStableOrder(t *testing.T) {
 	}
 }
 
+// assemble rolls up town-wide stats: total active, churning subset, and a
+// per-group breakdown that mirrors the (town-first) group ordering.
+func TestAssembleTownStats(t *testing.T) {
+	now := time.Now()
+	byGroup := map[string][]Agent{
+		"town": {
+			{AgentRef: AgentRef{Name: "mayor", Group: "town"}, Churning: true},
+			{AgentRef: AgentRef{Name: "deacon", Group: "town"}, Churning: false},
+		},
+		"GigaClip": {
+			{AgentRef: AgentRef{Name: "witness", Group: "GigaClip"}, Churning: true},
+			{AgentRef: AgentRef{Name: "furiosa", Group: "GigaClip"}, Churning: true},
+		},
+	}
+	snap := assemble(byGroup, now)
+
+	if snap.Stats.Active != 4 {
+		t.Errorf("Active = %d, want 4", snap.Stats.Active)
+	}
+	if snap.Stats.Churning != 3 {
+		t.Errorf("Churning = %d, want 3", snap.Stats.Churning)
+	}
+	if len(snap.Stats.Rigs) != 2 {
+		t.Fatalf("Rigs = %d, want 2", len(snap.Stats.Rigs))
+	}
+	// town sorts first, mirroring Groups ordering.
+	if got := snap.Stats.Rigs[0]; got.Name != "town" || got.Active != 2 || got.Churning != 1 {
+		t.Errorf("Rigs[0] = %+v, want {town 2 1}", got)
+	}
+	if got := snap.Stats.Rigs[1]; got.Name != "GigaClip" || got.Active != 2 || got.Churning != 2 {
+		t.Errorf("Rigs[1] = %+v, want {GigaClip 2 2}", got)
+	}
+}
+
 // Enrichment is fetched once and reused within the TTL, then refetched after it
 // expires. The slow gt/bd shell-outs must not run on every 1.5s transcript pass.
 func TestFetchEnrichmentTTLCache(t *testing.T) {

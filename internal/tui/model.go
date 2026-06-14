@@ -208,10 +208,13 @@ func (m Model) View() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("GAS TOWN ACTIVITY TOWER"))
 	b.WriteString("  " + dimStyle.Render(m.snap.GeneratedAt.Format("15:04:05")))
-	b.WriteString("  " + dimStyle.Render(fmt.Sprintf("%d active", len(m.agents))) + "\n")
+	b.WriteString("  " + dimStyle.Render(activeSummary(m.snap.Stats)) + "\n")
 
 	if town := renderTown(m.snap.Town); town != "" {
 		b.WriteString(town + "\n")
+	}
+	if rigs := renderRigs(m.snap.Stats); rigs != "" {
+		b.WriteString(rigs + "\n")
 	}
 	if line := m.renderSearch(); line != "" {
 		b.WriteString(line + "\n")
@@ -314,6 +317,36 @@ func renderTown(t tower.TownStatus) string {
 		return ""
 	}
 	return "  " + dimStyle.Render(strings.Join(parts, "   "))
+}
+
+// activeSummary renders the town-wide vital signs for the header: total active
+// sessions and how many are busy (churning). These are town aggregates and are
+// deliberately independent of the AGENTS-panel search filter, which scopes only
+// the list below.
+func activeSummary(s tower.TownStats) string {
+	out := fmt.Sprintf("%d active", s.Active)
+	if s.Churning > 0 {
+		out += fmt.Sprintf(" · %d busy", s.Churning)
+	}
+	return out
+}
+
+// renderRigs renders the per-group breakdown line: each group's name with its
+// active count and, when any are working, a green churning tally. Returns "" for
+// a town with a single group (nothing to break down) so the line is suppressed.
+func renderRigs(s tower.TownStats) string {
+	if len(s.Rigs) <= 1 {
+		return ""
+	}
+	var parts []string
+	for _, r := range s.Rigs {
+		seg := dimStyle.Render(fmt.Sprintf("%s %d", r.Name, r.Active))
+		if r.Churning > 0 {
+			seg += churnStyle.Render(fmt.Sprintf(" %d●", r.Churning))
+		}
+		parts = append(parts, seg)
+	}
+	return "  " + strings.Join(parts, dimStyle.Render("   "))
 }
 
 func renderAgent(a tower.Agent, selected bool, gc lipgloss.Color) string {

@@ -12,6 +12,14 @@ import (
 func fixtureSnapshot() tower.Snapshot {
 	return tower.Snapshot{
 		GeneratedAt: time.Date(2026, 5, 30, 15, 4, 5, 0, time.UTC),
+		Stats: tower.TownStats{
+			Active:   2,
+			Churning: 1,
+			Rigs: []tower.RigStat{
+				{Name: "town", Active: 1, Churning: 1},
+				{Name: "GigaClip", Active: 1, Churning: 0},
+			},
+		},
 		Groups: []tower.Group{
 			{Name: "town", Agents: []tower.Agent{{
 				AgentRef: tower.AgentRef{Name: "mayor", Role: "mayor", Group: "town"},
@@ -75,6 +83,46 @@ func TestQuit(t *testing.T) {
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	if cmd == nil {
 		t.Fatal("ctrl+c should return a quit command")
+	}
+}
+
+func TestTownStatsHeaderAndRollup(t *testing.T) {
+	out := newWithSnap().View()
+	// Header carries the town-wide busy rollup alongside the active count.
+	for _, want := range []string{"2 active", "1 busy"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("View() missing header stat %q:\n%s", want, out)
+		}
+	}
+	// Per-rig breakdown line: each group with its active count, churn tally on
+	// the working group.
+	for _, want := range []string{"town 1", "GigaClip 1", "1●"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("View() missing per-rig rollup %q:\n%s", want, out)
+		}
+	}
+}
+
+// The per-rig line is town-wide; a search filter narrows the AGENTS list but
+// must not change the header rollup.
+func TestTownStatsIgnoreSearchFilter(t *testing.T) {
+	m := newWithSnap()
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m = next.(Model)
+	for _, r := range "wit" {
+		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = next.(Model)
+	}
+	out := m.View()
+	if !strings.Contains(out, "2 active") {
+		t.Errorf("filtered view changed town-wide active count:\n%s", out)
+	}
+}
+
+// A single-group town has nothing to break down, so the rollup line is omitted.
+func TestRenderRigsSingleGroup(t *testing.T) {
+	if got := renderRigs(tower.TownStats{Active: 1, Rigs: []tower.RigStat{{Name: "town", Active: 1}}}); got != "" {
+		t.Errorf("single-group rollup should be empty, got %q", got)
 	}
 }
 

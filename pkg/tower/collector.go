@@ -26,10 +26,29 @@ type Group struct {
 	Agents []Agent
 }
 
+// RigStat summarizes one group's agent counts for the town-level rollup:
+// how many sessions are present and how many of them are currently churning.
+type RigStat struct {
+	Name     string
+	Active   int // agents present (discovered within ActiveWindow)
+	Churning int // subset currently working
+}
+
+// TownStats are the town-wide aggregates derived from a snapshot's agents:
+// total active sessions, how many are busy (churning), and a per-group
+// breakdown. Computed each snapshot (cheap, no shell-out) so the TUI header,
+// the web view, and the text snapshot share one source of truth.
+type TownStats struct {
+	Active   int
+	Churning int
+	Rigs     []RigStat
+}
+
 // Snapshot is a point-in-time view of all active agents in the town.
 type Snapshot struct {
 	GeneratedAt time.Time
 	Town        TownStatus
+	Stats       TownStats
 	Groups      []Group
 }
 
@@ -254,6 +273,15 @@ func assemble(byGroup map[string][]Agent, now time.Time) Snapshot {
 		sort.Slice(agents, func(i, j int) bool {
 			return agents[i].Name < agents[j].Name
 		})
+		churning := 0
+		for _, a := range agents {
+			if a.Churning {
+				churning++
+			}
+		}
+		snap.Stats.Active += len(agents)
+		snap.Stats.Churning += churning
+		snap.Stats.Rigs = append(snap.Stats.Rigs, RigStat{Name: g, Active: len(agents), Churning: churning})
 		snap.Groups = append(snap.Groups, Group{Name: g, Agents: agents})
 	}
 	return snap

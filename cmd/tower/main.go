@@ -98,6 +98,7 @@ func printSnapshot(s tower.Snapshot) {
 		fmt.Println("  (no active agents)")
 		return
 	}
+	fmt.Printf("  %d active · %d busy\n", s.Stats.Active, s.Stats.Churning)
 	for _, g := range s.Groups {
 		fmt.Printf("\n▌ %s\n", g.Name)
 		for _, a := range g.Agents {
