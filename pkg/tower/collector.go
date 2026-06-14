@@ -72,6 +72,11 @@ type Collector struct {
 // NewCollector returns a Collector for the given town root with sane defaults.
 func NewCollector(townRoot string) *Collector {
 	home, _ := os.UserHomeDir()
+	// gt runs agent sessions on a per-town named tmux socket. Bind the liveness
+	// probes to that socket so pane lookups hit the right server; querying the
+	// default socket (the old behavior) finds no sessions and makes working
+	// agents read as idle.
+	socket := gtSocketName(townRoot)
 	return &Collector{
 		TownRoot:       townRoot,
 		ProjectsDir:    filepath.Join(home, ".claude", "projects"),
@@ -83,8 +88,8 @@ func NewCollector(townRoot string) *Collector {
 		loadMail:       loadMail,
 		loadHooks:      loadHooks,
 		loadPrefixes:   loadSessionPrefixes,
-		listSessions:   listTmuxSessions,
-		capturePane:    capturePane,
+		listSessions:   func() (map[string]struct{}, error) { return listTmuxSessions(socket) },
+		capturePane:    func(session string) (string, error) { return capturePane(socket, session) },
 	}
 }
 

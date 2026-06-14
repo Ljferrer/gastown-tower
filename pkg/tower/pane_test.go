@@ -1,6 +1,7 @@
 package tower
 
 import (
+	"regexp"
 	"testing"
 	"time"
 )
@@ -97,6 +98,59 @@ func TestTmuxSession(t *testing.T) {
 		if ok != tt.ok || got != tt.want {
 			t.Errorf("tmuxSession(%+v) = %q,%v want %q,%v", tt.ref, got, ok, tt.want, tt.ok)
 		}
+	}
+}
+
+// townSocketName mirrors gt's per-town socket derivation: a sanitized basename,
+// a hyphen, and 6 hex chars of the canonical-path hash. It is deterministic for
+// a given path and path-sensitive (two towns sharing a basename differ).
+func TestTownSocketName(t *testing.T) {
+	got := townSocketName("/Users/ljf/gt")
+	if !regexp.MustCompile(`^[a-z0-9-]+-[0-9a-f]{6}$`).MatchString(got) {
+		t.Fatalf("socket name %q does not match <base>-<hash6>", got)
+	}
+	if got != townSocketName("/Users/ljf/gt") {
+		t.Error("socket name must be deterministic for the same path")
+	}
+	if townSocketName("/Users/ljf/gt") == townSocketName("/Users/ljf/work/gt") {
+		t.Error("towns sharing a basename must get distinct sockets via the path hash")
+	}
+}
+
+// gtSocketName honors GT_TMUX_SOCKET: a concrete value is used verbatim, while
+// unset/"default"/"auto" fall through to the per-town derivation.
+func TestGtSocketName(t *testing.T) {
+	const town = "/Users/ljf/gt"
+	derived := townSocketName(town)
+
+	t.Setenv("GT_TMUX_SOCKET", "my-socket")
+	if got := gtSocketName(town); got != "my-socket" {
+		t.Errorf("explicit GT_TMUX_SOCKET = %q, want my-socket", got)
+	}
+	for _, v := range []string{"", "default", "auto"} {
+		t.Setenv("GT_TMUX_SOCKET", v)
+		if got := gtSocketName(town); got != derived {
+			t.Errorf("GT_TMUX_SOCKET=%q = %q, want derived %q", v, got, derived)
+		}
+	}
+}
+
+// tmuxArgs prepends "-L <socket>" only when a socket is set, so an empty socket
+// degrades to the default-socket behavior rather than passing a bogus flag.
+func TestTmuxArgs(t *testing.T) {
+	got := tmuxArgs("gt-a62b6c", "ls", "-F", "x")
+	want := []string{"-L", "gt-a62b6c", "ls", "-F", "x"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("arg[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	bare := tmuxArgs("", "ls")
+	if len(bare) != 1 || bare[0] != "ls" {
+		t.Errorf("empty socket should not add -L, got %v", bare)
 	}
 }
 

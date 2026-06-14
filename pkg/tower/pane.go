@@ -3,6 +3,8 @@ package tower
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -116,10 +118,57 @@ func loadSessionPrefixes(townRoot string) (map[string]string, error) {
 	return parseSessionPrefixes(b), nil
 }
 
-// listTmuxSessions returns the set of live tmux session names. Best-effort:
-// when tmux is unavailable the caller treats every agent as having no pane.
-func listTmuxSessions() (map[string]struct{}, error) {
-	out, err := exec.Command("tmux", "ls", "-F", "#{session_name}").Output()
+// sanitizeSocketRe matches characters not allowed in a tmux socket name.
+var sanitizeSocketRe = regexp.MustCompile(`[^a-z0-9-]+`)
+
+// townSocketName derives the per-town tmux socket name exactly as gt does
+// (session/registry.go): the sanitized directory basename, a hyphen, and 6 hex
+// chars of the canonical path's SHA-256. The path hash keeps two towns that
+// share a basename (~/gt and ~/work/gt) on distinct sockets. gt launches every
+// agent session on this socket via `tmux -L <name>`; the tower must query the
+// same one or it sees no panes and misreads working agents as idle.
+func townSocketName(townRoot string) string {
+	base := strings.Trim(sanitizeSocketRe.ReplaceAllString(strings.ToLower(filepath.Base(townRoot)), "-"), "-")
+	if base == "" {
+		base = "default"
+	}
+	canonical, err := filepath.EvalSymlinks(townRoot)
+	if err != nil {
+		if canonical, err = filepath.Abs(townRoot); err != nil {
+			canonical = townRoot
+		}
+	}
+	h := sha256.Sum256([]byte(canonical))
+	return base + "-" + hex.EncodeToString(h[:3])
+}
+
+// gtSocketName returns the tmux socket gt uses for this town, honoring the
+// GT_TMUX_SOCKET override: a concrete value is used verbatim, while unset /
+// "default" / "auto" fall through to the per-town derivation.
+func gtSocketName(townRoot string) string {
+	switch socket := os.Getenv("GT_TMUX_SOCKET"); socket {
+	case "", "default", "auto":
+		return townSocketName(townRoot)
+	default:
+		return socket
+	}
+}
+
+// tmuxArgs prepends "-L <socket>" to a tmux argument list when socket is set,
+// targeting gt's named server. An empty socket yields the bare args so behavior
+// degrades to the default socket rather than passing an invalid flag.
+func tmuxArgs(socket string, args ...string) []string {
+	if socket == "" {
+		return args
+	}
+	return append([]string{"-L", socket}, args...)
+}
+
+// listTmuxSessions returns the set of live tmux session names on the given gt
+// socket. Best-effort: when tmux is unavailable the caller treats every agent
+// as having no pane.
+func listTmuxSessions(socket string) (map[string]struct{}, error) {
+	out, err := exec.Command("tmux", tmuxArgs(socket, "ls", "-F", "#{session_name}")...).Output()
 	if err != nil {
 		return nil, err
 	}
@@ -132,9 +181,10 @@ func listTmuxSessions() (map[string]struct{}, error) {
 	return set, nil
 }
 
-// capturePane returns the visible text of a tmux session's active pane.
-func capturePane(session string) (string, error) {
-	out, err := exec.Command("tmux", "capture-pane", "-p", "-t", session).Output()
+// capturePane returns the visible text of a tmux session's active pane on the
+// given gt socket.
+func capturePane(socket, session string) (string, error) {
+	out, err := exec.Command("tmux", tmuxArgs(socket, "capture-pane", "-p", "-t", session)...).Output()
 	if err != nil {
 		return "", err
 	}
