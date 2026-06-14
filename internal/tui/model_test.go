@@ -254,6 +254,92 @@ func TestSearchFiltersAgents(t *testing.T) {
 	}
 }
 
+// eventsFixture returns a snapshot whose flow log mixes a curated event with a
+// noisy session_start (newest-first, as the collector delivers it).
+func eventsFixture() tower.Snapshot {
+	base := time.Date(2026, 5, 30, 15, 4, 5, 0, time.UTC)
+	return tower.Snapshot{
+		GeneratedAt: base,
+		Events: []tower.Event{
+			{TS: base, Type: "sling", Actor: "GasTownTower/crew/Quasimodo",
+				Payload: map[string]any{"bead": "gtt-975.4", "target": "GasTownTower/polecats/furiosa"}},
+			{TS: base.Add(-1 * time.Minute), Type: "session_start", Actor: "GasTownTower/polecats/slit",
+				Payload: map[string]any{"role": "GasTownTower/polecats/slit"}},
+		},
+	}
+}
+
+func TestEventsPanelCuratedHidesSessionStart(t *testing.T) {
+	m := New(nil)
+	m.snap = eventsFixture()
+	m.flatten()
+
+	out := m.View()
+	if !strings.Contains(out, "sling") {
+		t.Errorf("curated view should show sling event:\n%s", out)
+	}
+	if strings.Contains(out, "session_start") {
+		t.Errorf("curated view must hide session_start:\n%s", out)
+	}
+	// The curated summary renders the bead → target with shortened address.
+	if !strings.Contains(out, "gtt-975.4") || !strings.Contains(out, "polecats/furiosa") {
+		t.Errorf("sling summary missing bead/target:\n%s", out)
+	}
+}
+
+func TestEventsToggleShowsAll(t *testing.T) {
+	m := New(nil)
+	m.snap = eventsFixture()
+	m.flatten()
+	if m.showAllEvents {
+		t.Fatal("default should be curated (showAllEvents=false)")
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	m = next.(Model)
+	if !m.showAllEvents {
+		t.Fatal("'t' did not toggle show-all")
+	}
+	out := m.View()
+	if !strings.Contains(out, "session_start") {
+		t.Errorf("show-all view should include session_start:\n%s", out)
+	}
+	if !strings.Contains(out, "all events") {
+		t.Errorf("show-all header subtitle missing:\n%s", out)
+	}
+
+	// Toggling again returns to curated.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	m = next.(Model)
+	if m.showAllEvents {
+		t.Fatal("second 't' did not toggle back to curated")
+	}
+}
+
+func TestEventsVisibleNewestFirst(t *testing.T) {
+	m := New(nil)
+	m.snap = eventsFixture()
+	m.showAllEvents = true // include both events
+	vis := m.visibleEvents()
+	if len(vis) != 2 {
+		t.Fatalf("want 2 visible events, got %d", len(vis))
+	}
+	if vis[0].Type != "sling" || vis[1].Type != "session_start" {
+		t.Fatalf("not newest-first: %s, %s", vis[0].Type, vis[1].Type)
+	}
+}
+
+func TestEventsSearchFilters(t *testing.T) {
+	m := New(nil)
+	m.snap = eventsFixture()
+	m.showAllEvents = true
+	m.query = "session" // matches the session_start actor/type
+	vis := m.visibleEvents()
+	if len(vis) != 1 || vis[0].Type != "session_start" {
+		t.Fatalf("search 'session' filtered to %d events, want [session_start]", len(vis))
+	}
+}
+
 func TestViewShowsTownAndHook(t *testing.T) {
 	m := New(nil)
 	snap := fixtureSnapshot()

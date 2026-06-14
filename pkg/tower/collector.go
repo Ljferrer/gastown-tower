@@ -50,6 +50,7 @@ type Snapshot struct {
 	Town        TownStatus
 	Stats       TownStats
 	Groups      []Group
+	Events      []Event // town flow log, newest-first (ring-windowed)
 }
 
 // enrichment bundles the slow-changing town-level data (reputation, mail, and
@@ -87,6 +88,8 @@ type Collector struct {
 	mu       sync.Mutex
 	enrich   enrichment
 	enrichAt time.Time
+
+	events eventRing // tails <TownRoot>/.events.jsonl across polls
 }
 
 // NewCollector returns a Collector for the given town root with sane defaults.
@@ -171,6 +174,7 @@ func (c *Collector) Snapshot() (Snapshot, error) {
 			}
 		}
 	}
+	snap.Events = c.events.tail(filepath.Join(c.TownRoot, ".events.jsonl"), now)
 	return snap, nil
 }
 

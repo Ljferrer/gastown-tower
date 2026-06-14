@@ -31,20 +31,21 @@ const (
 
 // Model is the Bubble Tea model for the live Tower.
 type Model struct {
-	c            *tower.Collector
-	snap         tower.Snapshot
-	agents       []tower.Agent // flattened (and search-filtered) display order
-	cursor       int           // selected agent within the AGENTS panel
-	expanded     map[string]bool
-	focus        panel  // which panel receives scroll/enter
-	query        string // active search filter ("" = no filter)
-	searching    bool   // true while the user is typing a search query
-	convoyScroll int
-	eventScroll  int
-	width        int
-	height       int
-	err          error
-	interval     time.Duration
+	c             *tower.Collector
+	snap          tower.Snapshot
+	agents        []tower.Agent // flattened (and search-filtered) display order
+	cursor        int           // selected agent within the AGENTS panel
+	expanded      map[string]bool
+	focus         panel  // which panel receives scroll/enter
+	query         string // active search filter ("" = no filter)
+	searching     bool   // true while the user is typing a search query
+	showAllEvents bool   // false = curated flow; 't' toggles faithful (show-all)
+	convoyScroll  int
+	eventScroll   int
+	width         int
+	height        int
+	err           error
+	interval      time.Duration
 }
 
 // New builds a Model that refreshes from the given collector.
@@ -91,6 +92,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.focus = (m.focus + panelCount - 1) % panelCount
 		case "/":
 			m.searching = true
+		case "t":
+			// Toggle the EVENTS panel between curated flow and show-all.
+			m.showAllEvents = !m.showAllEvents
+			m.eventScroll = 0
 		case "up", "k":
 			m.scroll(-1)
 		case "down", "j":
@@ -139,7 +144,7 @@ func (m *Model) scroll(delta int) {
 	case panelConvoys:
 		m.convoyScroll = clampScroll(m.convoyScroll+delta, convoyCount(m.snap))
 	case panelEvents:
-		m.eventScroll = clampScroll(m.eventScroll+delta, eventCount(m.snap))
+		m.eventScroll = clampScroll(m.eventScroll+delta, len(m.visibleEvents()))
 	}
 }
 
@@ -186,11 +191,38 @@ func (m Model) matches(a tower.Agent) bool {
 	return strings.Contains(hay, strings.ToLower(m.query))
 }
 
-// convoyCount and eventCount report how many rows each panel currently has.
-// These data sources arrive in later phases (gtt-975.4 / gtt-975.5); until then
-// the panels are empty but the focus/scroll machinery is wired and tested.
+// convoyCount reports how many rows the convoys panel currently has. That data
+// source arrives in a later phase (gtt-975.5); until then the panel is empty but
+// the focus/scroll machinery is wired and tested.
 func convoyCount(tower.Snapshot) int { return 0 }
-func eventCount(tower.Snapshot) int  { return 0 }
+
+// visibleEvents is the EVENTS panel's display list: the snapshot's newest-first
+// events with the curated filter (unless show-all) and the active search query
+// applied.
+func (m Model) visibleEvents() []tower.Event {
+	out := make([]tower.Event, 0, len(m.snap.Events))
+	for _, e := range m.snap.Events {
+		if !m.showAllEvents && !e.Curated() {
+			continue
+		}
+		if !m.matchesEvent(e) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// matchesEvent reports whether an event passes the active search filter. An empty
+// query matches everything; matching is case-insensitive across the event's type,
+// actor, and humanized summary.
+func (m Model) matchesEvent(e tower.Event) bool {
+	if m.query == "" {
+		return true
+	}
+	hay := strings.ToLower(e.Type + " " + e.Actor + " " + eventSummary(e))
+	return strings.Contains(hay, strings.ToLower(m.query))
+}
 
 // ---- styling ----
 
@@ -228,7 +260,7 @@ func (m Model) View() string {
 	b.WriteString(m.renderConvoysPanel())
 	b.WriteString(m.renderEventsPanel())
 
-	b.WriteString("\n" + helpStyle.Render("tab focus · j/k scroll · enter expand · / search · q quit") + "\n")
+	b.WriteString("\n" + helpStyle.Render("tab focus · j/k scroll · enter expand · / search · t all-events · q quit") + "\n")
 	return b.String()
 }
 
@@ -294,9 +326,128 @@ func (m Model) renderConvoysPanel() string {
 	return b + "  " + dimStyle.Render("(no convoy data yet)") + "\n"
 }
 
+// eventsViewport caps how many event rows render at once; eventScroll indexes
+// the topmost visible (newest-first) event so j/k pages through the flow.
+const eventsViewport = 12
+
 func (m Model) renderEventsPanel() string {
-	b := panelHeader("EVENTS", "curated flow, newest-first", m.focus == panelEvents)
-	return b + "  " + dimStyle.Render("(no event data yet)") + "\n"
+	sub := "curated flow, newest-first"
+	if m.showAllEvents {
+		sub = "all events, newest-first"
+	}
+	b := panelHeader("EVENTS", sub, m.focus == panelEvents)
+
+	evs := m.visibleEvents()
+	if len(evs) == 0 {
+		return b + "  " + dimStyle.Render("(no events)") + "\n"
+	}
+
+	top := clampScroll(m.eventScroll, len(evs))
+	end := top + eventsViewport
+	if end > len(evs) {
+		end = len(evs)
+	}
+	var sb strings.Builder
+	sb.WriteString(b)
+	for _, e := range evs[top:end] {
+		sb.WriteString(renderEvent(e))
+	}
+	if len(evs) > eventsViewport {
+		sb.WriteString("  " + helpStyle.Render(fmt.Sprintf("%d–%d of %d", top+1, end, len(evs))) + "\n")
+	}
+	return sb.String()
+}
+
+// renderEvent formats one flow-log line: "HH:MM type actor  summary".
+func renderEvent(e tower.Event) string {
+	ts := dimStyle.Render(e.TS.Format("15:04"))
+	typ := eventTypeStyle(e.Type).Render(fmt.Sprintf("%-16s", e.Type))
+	line := fmt.Sprintf("  %s %s %s", ts, typ, shortAddr(e.Actor))
+	if sum := eventSummary(e); sum != "" {
+		line += "  " + dimStyle.Render(trunc(sum, 48))
+	}
+	return line + "\n"
+}
+
+// eventSummary pulls a short human-readable detail from an event's payload,
+// keyed by type. Returns "" when nothing useful is present.
+func eventSummary(e tower.Event) string {
+	s := func(k string) string {
+		if v, ok := e.Payload[k].(string); ok {
+			return v
+		}
+		return ""
+	}
+	switch e.Type {
+	case "sling":
+		return arrow(s("bead"), shortAddr(s("target")))
+	case "done":
+		return s("bead")
+	case "unhook":
+		return s("bead")
+	case "handoff":
+		return s("subject")
+	case "mail":
+		return arrow(s("subject"), shortAddr(s("to")))
+	case "spawn":
+		return arrow(s("rig"), s("polecat"))
+	case "nudge":
+		return s("reason")
+	case "session_start":
+		return s("role")
+	}
+	if strings.HasPrefix(e.Type, "escalation_") {
+		if r := s("reason"); r != "" {
+			return r
+		}
+		return s("escalation_id")
+	}
+	return ""
+}
+
+// eventTypeStyle accents a handful of event types so escalations and completions
+// stand out in the flow; everything else uses the neutral panel style.
+func eventTypeStyle(t string) lipgloss.Style {
+	switch {
+	case strings.HasPrefix(t, "escalation_"):
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("203")) // red
+	case t == "done":
+		return churnStyle
+	default:
+		return panelStyle
+	}
+}
+
+// arrow joins two fields as "a → b", or returns whichever is non-empty.
+func arrow(a, b string) string {
+	switch {
+	case a != "" && b != "":
+		return a + " → " + b
+	case a != "":
+		return a
+	default:
+		return b
+	}
+}
+
+// shortAddr keeps the last two path segments of an agent address for readability
+// ("GasTownTower/polecats/furiosa" → "polecats/furiosa").
+func shortAddr(s string) string {
+	parts := strings.Split(strings.TrimSuffix(s, "/"), "/")
+	if len(parts) >= 2 {
+		return strings.Join(parts[len(parts)-2:], "/")
+	}
+	return s
+}
+
+// trunc shortens s to max runes with an ellipsis, collapsing newlines first.
+func trunc(s string, max int) string {
+	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
+	r := []rune(s)
+	if len(r) > max {
+		return string(r[:max-1]) + "…"
+	}
+	return s
 }
 
 // renderTown formats the town-status line: mail envelope with unread/total and
