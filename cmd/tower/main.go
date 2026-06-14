@@ -54,7 +54,7 @@ func runTUI(args []string) {
 	_ = fs.Parse(args)
 
 	c := newCollector(*town, *overseers)
-	p := tea.NewProgram(tui.New(c), tea.WithAltScreen())
+	p := tea.NewProgram(tui.New(c), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "tui:", err)
 		os.Exit(1)

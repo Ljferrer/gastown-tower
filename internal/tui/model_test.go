@@ -471,3 +471,208 @@ func TestViewShowsTownAndHook(t *testing.T) {
 		t.Errorf("expanded view missing hook detail")
 	}
 }
+
+// lineOf returns the 0-based row index of the first View line containing sub,
+// or -1. The mouse handler is fed absolute Y, so tests locate an agent's row by
+// the unique text it renders — this keeps the tests independent of the panel's
+// dynamic vertical offset and validates the real "click where you see it"
+// contract rather than re-deriving agentAtY's arithmetic.
+func lineOf(view, sub string) int {
+	for i, ln := range strings.Split(view, "\n") {
+		if strings.Contains(ln, sub) {
+			return i
+		}
+	}
+	return -1
+}
+
+func leftClick(y int) tea.MouseMsg {
+	return tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Y: y}
+}
+
+// A left-click on an agent's row toggles its expanded state and moves the
+// AGENTS cursor (and focus) to it — the same effect as enter on that row.
+// Clicking again collapses it.
+func TestMouseClickTogglesAgent(t *testing.T) {
+	m := newWithSnap()
+	// Click the witness row (second agent), located by its unique idle label.
+	y := lineOf(m.View(), "idle 5m")
+	if y < 0 {
+		t.Fatalf("could not locate witness row in view:\n%s", m.View())
+	}
+	next, _ := m.Update(leftClick(y))
+	m = next.(Model)
+	if !m.expanded["GigaClip/witness"] {
+		t.Fatalf("click did not expand witness (cursor=%d):\n%s", m.cursor, m.View())
+	}
+	if m.cursor != 1 {
+		t.Errorf("click did not move cursor to witness: cursor=%d, want 1", m.cursor)
+	}
+	if m.focus != panelAgents {
+		t.Errorf("click did not focus AGENTS panel: focus=%v", m.focus)
+	}
+	if !strings.Contains(m.View(), "role witness") {
+		t.Errorf("expanded detail not rendered after click")
+	}
+	// Clicking the same row again collapses it (row stays put; detail is below).
+	y = lineOf(m.View(), "idle 5m")
+	next, _ = m.Update(leftClick(y))
+	m = next.(Model)
+	if m.expanded["GigaClip/witness"] {
+		t.Errorf("second click did not collapse witness")
+	}
+}
+
+// Clicks that miss agent rows — group headers, the blank panel-header line, and
+// rows below the AGENTS panel — must not toggle anything and must not panic.
+func TestMouseClickNoOpOffAgents(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sub  string // text identifying the row to click; "" means a fixed Y
+		y    int
+	}{
+		{name: "group header", sub: "▌ town"},
+		{name: "agents panel header", sub: "▌ AGENTS"},
+		{name: "blank/top line", y: 0},
+		{name: "convoys panel", sub: "CONVOYS"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newWithSnap()
+			y := tc.y
+			if tc.sub != "" {
+				if y = lineOf(m.View(), tc.sub); y < 0 {
+					t.Fatalf("could not locate %q:\n%s", tc.sub, m.View())
+				}
+			}
+			next, _ := m.Update(leftClick(y))
+			m = next.(Model)
+			if len(m.expanded) != 0 {
+				t.Errorf("click on %s toggled an agent: %v", tc.name, m.expanded)
+			}
+		})
+	}
+}
+
+// Non-left buttons and motion/release events must not toggle agents even when
+// they land on an agent's row.
+func TestMouseNonLeftIgnored(t *testing.T) {
+	m := newWithSnap()
+	y := lineOf(m.View(), "idle 5m")
+	for _, msg := range []tea.MouseMsg{
+		{Action: tea.MouseActionPress, Button: tea.MouseButtonRight, Y: y},
+		{Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft, Y: y},
+		{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown, Y: y},
+	} {
+		next, _ := m.Update(msg)
+		m = next.(Model)
+	}
+	if len(m.expanded) != 0 {
+		t.Errorf("non-left mouse events toggled an agent: %v", m.expanded)
+	}
+}
+
+// threeAgentFixture is one group of three churning agents with distinct
+// activity labels, so a test can locate any row by text.
+func threeAgentFixture() tower.Snapshot {
+	agent := func(name, doing string) tower.Agent {
+		return tower.Agent{
+			AgentRef: tower.AgentRef{Name: name, Role: "polecat", Rig: "GasTownTower", Group: "GasTownTower"},
+			Status:   tower.StatusChurning,
+			Churning: true,
+			Stats:    tower.TranscriptStats{Model: "claude-opus-4-8", ContextPct: 0.3, NowDoing: doing},
+		}
+	}
+	return tower.Snapshot{
+		GeneratedAt: time.Date(2026, 5, 30, 15, 4, 5, 0, time.UTC),
+		Stats:       tower.TownStats{Active: 3, Churning: 3},
+		Groups: []tower.Group{{Name: "GasTownTower", Agents: []tower.Agent{
+			agent("nux", "doing-aaa"),
+			agent("slit", "doing-bbb"),
+			agent("rictus", "doing-ccc"),
+		}}},
+	}
+}
+
+// A click must hit the right agent even when earlier rows are expanded and have
+// pushed later rows down by a variable number of detail lines.
+func TestMouseClickBelowExpandedAgents(t *testing.T) {
+	m := New(nil)
+	m.snap = threeAgentFixture()
+	m.flatten()
+	// Expand the first two agents so the third row is shifted down.
+	m.expanded["GasTownTower/nux"] = true
+	m.expanded["GasTownTower/slit"] = true
+
+	y := lineOf(m.View(), "doing-ccc")
+	if y < 0 {
+		t.Fatalf("could not locate third agent row:\n%s", m.View())
+	}
+	next, _ := m.Update(leftClick(y))
+	m = next.(Model)
+	if !m.expanded["GasTownTower/rictus"] {
+		t.Fatalf("click below expanded agents hit the wrong row (cursor=%d):\n%s", m.cursor, m.View())
+	}
+	if m.cursor != 2 {
+		t.Errorf("cursor=%d, want 2", m.cursor)
+	}
+	// The earlier agents' state is untouched.
+	if !m.expanded["GasTownTower/nux"] || !m.expanded["GasTownTower/slit"] {
+		t.Errorf("click disturbed earlier agents' expanded state: %v", m.expanded)
+	}
+}
+
+// agentAtY must respect the dynamic header offset: the same agent is clickable
+// regardless of which optional header lines (town, rigs, search, error) are
+// present. Each case renders, finds the agent's row by text, and asserts the
+// click toggles exactly that agent.
+func TestMouseClickAcrossHeaderOffsets(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(*Model)
+	}{
+		{name: "minimal (no town/rigs/search/error)", setup: func(m *Model) {
+			m.snap = threeAgentFixture() // single group → rigs line suppressed
+		}},
+		{name: "town+rigs lines present", setup: func(m *Model) {
+			s := fixtureSnapshot() // two rigs → rigs line present
+			s.Town = tower.TownStatus{Mail: tower.Mail{Total: 3, Unread: 1}}
+			m.snap = s
+		}},
+		{name: "search line present", setup: func(m *Model) {
+			m.snap = fixtureSnapshot()
+			m.query = "wit" // filter line renders; witness still matches
+		}},
+		{name: "error line present", setup: func(m *Model) {
+			m.snap = fixtureSnapshot()
+			m.err = errTest
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(nil)
+			tc.setup(&m)
+			m.flatten()
+			// Click the witness row (idle) — present in every fixture above
+			// except the minimal one, which uses doing-ccc instead.
+			label, key := "idle 5m", "GigaClip/witness"
+			if lineOf(m.View(), label) < 0 {
+				label, key = "doing-ccc", "GasTownTower/rictus"
+			}
+			y := lineOf(m.View(), label)
+			if y < 0 {
+				t.Fatalf("could not locate target row %q:\n%s", label, m.View())
+			}
+			next, _ := m.Update(leftClick(y))
+			m = next.(Model)
+			if !m.expanded[key] {
+				t.Errorf("click at Y=%d did not toggle %s:\n%s", y, key, m.View())
+			}
+		})
+	}
+}
+
+var errTest = errString("collector unavailable")
+
+type errString string
+
+func (e errString) Error() string { return string(e) }

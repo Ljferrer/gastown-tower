@@ -79,6 +79,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.snap, m.err = msg.snap, msg.err
 		m.flatten()
 		m.clampCursor()
+	case tea.MouseMsg:
+		// A left-button press on an agent's row focuses the AGENTS panel, moves
+		// the cursor there, and toggles that agent's expanded detail — the same
+		// effect as navigating to it and pressing enter. Clicks elsewhere (group
+		// headers, blank space, other panels) miss and are a no-op.
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			if i := m.agentAtY(msg.Y); i >= 0 {
+				m.focus = panelAgents
+				m.cursor = i
+				k := agentKey(m.agents[i])
+				m.expanded[k] = !m.expanded[k]
+			}
+		}
 	case tea.KeyMsg:
 		if m.searching {
 			return m.updateSearch(msg)
@@ -239,6 +252,21 @@ var (
 // View implements tea.Model. It is pure (no TTY needed) so it is unit-testable.
 func (m Model) View() string {
 	var b strings.Builder
+	b.WriteString(m.renderHeader())
+	b.WriteString(m.renderAgentsPanel())
+	b.WriteString(m.renderConvoysPanel())
+	b.WriteString(m.renderEventsPanel())
+
+	b.WriteString("\n" + helpStyle.Render("tab focus · j/k scroll · enter/click expand · / search · t all-events · q quit") + "\n")
+	return b.String()
+}
+
+// renderHeader renders everything above the AGENTS panel: the title/summary
+// line plus the optional town, rigs, search, and error lines. It is the single
+// source of truth for the AGENTS panel's vertical offset — the mouse hit-test
+// (agentAtY) counts the lines this produces, so the two cannot drift.
+func (m Model) renderHeader() string {
+	var b strings.Builder
 	b.WriteString(titleStyle.Render("GAS TOWN ACTIVITY TOWER"))
 	b.WriteString("  " + dimStyle.Render(m.snap.GeneratedAt.Format("15:04:05")))
 	b.WriteString("  " + dimStyle.Render(activeSummary(m.snap.Stats)) + "\n")
@@ -256,12 +284,6 @@ func (m Model) View() string {
 	if m.err != nil {
 		b.WriteString("\n  " + dimStyle.Render("error: "+m.err.Error()) + "\n")
 	}
-
-	b.WriteString(m.renderAgentsPanel())
-	b.WriteString(m.renderConvoysPanel())
-	b.WriteString(m.renderEventsPanel())
-
-	b.WriteString("\n" + helpStyle.Render("tab focus · j/k scroll · enter expand · / search · t all-events · q quit") + "\n")
 	return b.String()
 }
 
@@ -320,6 +342,51 @@ func (m Model) renderAgentsPanel() string {
 		b.WriteString(rows.String())
 	}
 	return b.String()
+}
+
+// agentAtY maps an absolute terminal row (a mouse click's Y, 0-based) to the
+// index into m.agents of the agent whose row occupies that line, or -1 if the
+// click did not land on an agent row (header lines, group headers, expanded
+// detail lines, or anything below the AGENTS panel).
+//
+// It deliberately replays renderAgentsPanel's exact layout so the two cannot
+// drift: it counts the header lines renderHeader emits, skips the two AGENTS
+// panel-header lines (the blank line + "▌ AGENTS" that panelHeader produces),
+// then walks the same group/agent iteration, advancing one line per agent row
+// and renderExpanded's line count for each expanded agent above the target.
+func (m Model) agentAtY(y int) int {
+	if len(m.agents) == 0 {
+		return -1
+	}
+	// Lines above the AGENTS panel, then its blank + "▌ AGENTS" header lines.
+	line := strings.Count(m.renderHeader(), "\n") + 2
+	idx := 0
+	for _, g := range m.snap.Groups {
+		visible := 0
+		for _, a := range g.Agents {
+			if m.matches(a) {
+				visible++
+			}
+		}
+		if visible == 0 {
+			continue // group with no visible rows is not rendered (no header)
+		}
+		line++ // the group header line ("▌ <group>")
+		for _, a := range g.Agents {
+			if !m.matches(a) {
+				continue
+			}
+			if y == line {
+				return idx
+			}
+			line++ // the agent's own row
+			if m.expanded[agentKey(a)] {
+				line += strings.Count(renderExpanded(a), "\n") // expanded detail
+			}
+			idx++
+		}
+	}
+	return -1
 }
 
 func (m Model) renderConvoysPanel() string {
