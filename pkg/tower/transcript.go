@@ -37,6 +37,7 @@ const scanLimit = 64 << 20 // 64 MiB
 
 type tRecord struct {
 	Type    string    `json:"type"`
+	Subtype string    `json:"subtype"`
 	Message *tMessage `json:"message"`
 }
 
@@ -110,7 +111,19 @@ func parseTranscript(r io.Reader) TranscriptStats {
 
 func processLine(line []byte, s *TranscriptStats, lastUsage **tUsage, lastTool **tBlock, lastText *string) {
 	var rec tRecord
-	if err := json.Unmarshal(line, &rec); err != nil || rec.Message == nil {
+	if err := json.Unmarshal(line, &rec); err != nil {
+		return
+	}
+	// A compaction boundary discards the conversation that preceded it: every
+	// prior usage record measures a context window that no longer exists. Drop
+	// the running usage so ContextTokens reflects the post-compact window — the
+	// next assistant turn's usage if one follows, or zero while the agent sits
+	// idle right after /compact (never the stale pre-compact peak). gtt-1wj.
+	if rec.Type == "system" && rec.Subtype == "compact_boundary" {
+		*lastUsage = nil
+		return
+	}
+	if rec.Message == nil {
 		return
 	}
 	m := rec.Message

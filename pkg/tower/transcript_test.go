@@ -110,6 +110,37 @@ func TestParseTranscriptOverseerSignals(t *testing.T) {
 	}
 }
 
+// A compaction boundary invalidates every prior usage record: the pre-compact
+// turns belong to a context window that no longer exists. ContextTokens must
+// reflect the CURRENT window — the post-compact usage if the agent has taken a
+// turn since, or zero while it sits idle right after /compact — never the
+// pre-compact peak. Regression for gtt-1wj (tower ctx% stuck at pre-compact).
+func TestParseTranscriptCompactBoundary(t *testing.T) {
+	// 224692-token pre-compact turn (~89% on a 256k window).
+	const preCompact = `{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-4-6","usage":{"input_tokens":692,"cache_read_input_tokens":224000,"cache_creation_input_tokens":0,"output_tokens":40},"content":[{"type":"text","text":"big"}]}}`
+	const boundary = `{"type":"system","subtype":"compact_boundary"}`
+	const summary = `{"type":"user","isCompactSummary":true,"message":{"role":"user","content":[{"type":"text","text":"summary"}]}}`
+	// 46588-token post-compact turn.
+	const postCompact = `{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-4-6","usage":{"input_tokens":588,"cache_read_input_tokens":46000,"cache_creation_input_tokens":0,"output_tokens":10},"content":[{"type":"text","text":"fresh"}]}}`
+
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"idle right after compact resets to zero", preCompact + "\n" + boundary + "\n" + summary, 0},
+		{"post-compact turn reflects current window", preCompact + "\n" + boundary + "\n" + summary + "\n" + postCompact, 46588},
+		{"no compaction keeps latest usage", preCompact, 224692},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseTranscript(strings.NewReader(tc.body)).ContextTokens; got != tc.want {
+				t.Errorf("ContextTokens=%d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestHumanizeActivity(t *testing.T) {
 	cases := []struct {
 		name string
