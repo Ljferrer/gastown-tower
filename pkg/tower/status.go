@@ -61,8 +61,9 @@ func (s *AgentStatus) UnmarshalJSON(b []byte) error {
 // "awaiting overseer" input. By default this is the mayor and any crew agent;
 // autonomous workers (polecats), infrastructure (witness/refinery/dog), and
 // bare rigs are excluded so their idle/blocking states never read as awaiting.
-// Config-driven overrides (tower.toml / --overseer-agents) are deferred to a
-// separate bead (gtt-975.3).
+// This is the role default; per-agent overrides (tower.toml's
+// overseer_agents_extra/exclude and the --overseer-agents flag) layer on top
+// via overseerPolicy in config.go.
 func overseerEligible(role string) bool {
 	switch role {
 	case "mayor", "crew":

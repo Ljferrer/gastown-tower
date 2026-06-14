@@ -93,6 +93,11 @@ type Collector struct {
 	listSessions func() (map[string]struct{}, error)
 	capturePane  func(session string) (string, error)
 
+	// overseer gates which agents can read as awaiting-overseer. The zero value
+	// is the role default (mayor + crew); NewCollector layers tower.toml on top,
+	// and SetOverseerAgents applies an ad-hoc CLI override.
+	overseer overseerPolicy
+
 	mu       sync.Mutex
 	enrich   enrichment
 	enrichAt time.Time
@@ -108,8 +113,12 @@ func NewCollector(townRoot string) *Collector {
 	// default socket (the old behavior) finds no sessions and makes working
 	// agents read as idle.
 	socket := gtSocketName(townRoot)
+	// Best-effort: a missing tower.toml leaves the zero policy (role default);
+	// a malformed one is ignored here so a bad config never blocks the cockpit.
+	cfg, _ := LoadConfig(townRoot)
 	return &Collector{
 		TownRoot:       townRoot,
+		overseer:       newOverseerPolicy(cfg),
 		ProjectsDir:    filepath.Join(home, ".claude", "projects"),
 		ChurnWindow:    8 * time.Second,
 		TurnWindow:     5 * time.Minute,
@@ -125,6 +134,14 @@ func NewCollector(townRoot string) *Collector {
 		listSessions:   func() (map[string]struct{}, error) { return listTmuxSessions(socket) },
 		capturePane:    func(session string) (string, error) { return capturePane(socket, session) },
 	}
+}
+
+// SetOverseerAgents applies an ad-hoc CLI override (--overseer-agents): exactly
+// the given addresses become awaiting-overseer eligible, ignoring tower.toml and
+// the role default. An empty slice is a no-op, leaving the configured policy in
+// place. Call before Snapshot; not safe to race with a live poll.
+func (c *Collector) SetOverseerAgents(addrs []string) {
+	c.overseer = c.overseer.withOverride(addrs)
 }
 
 // Snapshot discovers active agent sessions under the town and derives stats.
@@ -254,7 +271,7 @@ func (c *Collector) fetchEnrichment(now time.Time) enrichment {
 // mtime-churn so a quiet agent sitting on a question reads orange, not green.
 func (c *Collector) agentStatus(ref AgentRef, prefixes map[string]string, sessions map[string]struct{}, mt, now time.Time, stats TranscriptStats) (AgentStatus, TurnProgress) {
 	fresh := now.Sub(mt) <= c.ActiveWindow
-	eligible := overseerEligible(ref.Role)
+	eligible := c.overseer.eligible(ref)
 	// Transcript-tail awaiting signal (pane-independent), gated on eligibility
 	// and freshness. The pane path adds paneAwaiting on top of this.
 	txAwaiting := eligible && fresh && (stats.PendingAsk || stats.TrailingQuestion)

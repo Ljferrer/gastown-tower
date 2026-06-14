@@ -43,16 +43,17 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: tower <snapshot|tui|serve> [--town <dir>] [--addr <host:port>]")
+	fmt.Fprintln(os.Stderr, "usage: tower <snapshot|tui|serve> [--town <dir>] [--addr <host:port>] [--overseer-agents <a,b>]")
 	os.Exit(2)
 }
 
 func runTUI(args []string) {
 	fs := flag.NewFlagSet("tui", flag.ExitOnError)
 	town := fs.String("town", defaultTown(), "town root directory")
+	overseers := fs.String("overseer-agents", "", overseerAgentsHelp)
 	_ = fs.Parse(args)
 
-	c := tower.NewCollector(*town)
+	c := newCollector(*town, *overseers)
 	p := tea.NewProgram(tui.New(c), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "tui:", err)
@@ -64,9 +65,10 @@ func runServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	town := fs.String("town", defaultTown(), "town root directory")
 	addr := fs.String("addr", defaultAddr, "listen address (host:port)")
+	overseers := fs.String("overseer-agents", "", overseerAgentsHelp)
 	_ = fs.Parse(args)
 
-	srv := server.New(tower.NewCollector(*town))
+	srv := server.New(newCollector(*town, *overseers))
 	fmt.Fprintf(os.Stderr, "tower serve: listening on http://%s\n", *addr)
 	if err := http.ListenAndServe(*addr, srv.Handler()); err != nil {
 		fmt.Fprintln(os.Stderr, "serve:", err)
@@ -77,9 +79,10 @@ func runServe(args []string) {
 func runSnapshot(args []string) {
 	fs := flag.NewFlagSet("snapshot", flag.ExitOnError)
 	town := fs.String("town", defaultTown(), "town root directory")
+	overseers := fs.String("overseer-agents", "", overseerAgentsHelp)
 	_ = fs.Parse(args)
 
-	snap, err := tower.NewCollector(*town).Snapshot()
+	snap, err := newCollector(*town, *overseers).Snapshot()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "snapshot:", err)
 		os.Exit(1)
@@ -90,6 +93,32 @@ func runSnapshot(args []string) {
 func defaultTown() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "gt")
+}
+
+// overseerAgentsHelp documents the --overseer-agents flag shared by all
+// subcommands.
+const overseerAgentsHelp = "comma-separated agent addresses; ad-hoc override of awaiting-overseer eligibility (replaces tower.toml + role default)"
+
+// newCollector builds a Collector for town and applies the --overseer-agents
+// override when the flag is set. An empty flag leaves the tower.toml / role
+// default policy untouched.
+func newCollector(town, overseerAgents string) *tower.Collector {
+	c := tower.NewCollector(town)
+	if addrs := splitList(overseerAgents); len(addrs) > 0 {
+		c.SetOverseerAgents(addrs)
+	}
+	return c
+}
+
+// splitList parses a comma-separated flag value into trimmed, non-empty items.
+func splitList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func printSnapshot(s tower.Snapshot) {
