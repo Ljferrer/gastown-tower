@@ -23,6 +23,7 @@ func fixtureSnapshot() tower.Snapshot {
 		Groups: []tower.Group{
 			{Name: "town", Agents: []tower.Agent{{
 				AgentRef: tower.AgentRef{Name: "mayor", Role: "mayor", Group: "town"},
+				Status:   tower.StatusChurning,
 				Churning: true,
 				Stats:    tower.TranscriptStats{Model: "claude-opus-4-8", ContextPct: 0.45, Turns: 10, ToolCalls: 5, FileReads: 1, NowDoing: "running go test"},
 			}}},
@@ -53,6 +54,30 @@ func TestView(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("View() missing %q", want)
 		}
+	}
+}
+
+// An agent in the awaiting-overseer state renders the "awaiting overseer"
+// activity label instead of its now-doing line or an idle marker.
+func TestViewAwaitingOverseer(t *testing.T) {
+	m := New(nil)
+	m.snap = tower.Snapshot{
+		GeneratedAt: time.Date(2026, 5, 30, 15, 4, 5, 0, time.UTC),
+		Stats:       tower.TownStats{Active: 1},
+		Groups: []tower.Group{{Name: "town", Agents: []tower.Agent{{
+			AgentRef: tower.AgentRef{Name: "mayor", Role: "mayor", Group: "town"},
+			Status:   tower.StatusAwaiting,
+			Stats:    tower.TranscriptStats{Model: "claude-opus-4-8", ContextPct: 0.3, NowDoing: "asking a question"},
+		}}}},
+	}
+	m.flatten()
+
+	out := m.View()
+	if !strings.Contains(out, "awaiting overseer") {
+		t.Errorf("awaiting agent should show 'awaiting overseer':\n%s", out)
+	}
+	if strings.Contains(out, "idle ") {
+		t.Errorf("awaiting agent must not render as idle:\n%s", out)
 	}
 }
 

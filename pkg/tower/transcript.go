@@ -21,6 +21,14 @@ type TranscriptStats struct {
 	Turns         int    // assistant messages
 	NowDoing      string // humanized latest tool_use (or last assistant text)
 	MidTurn       bool   // last conversation message awaits a reply (agent is busy)
+
+	// Overseer-prompt signals derived from the transcript tail. PendingAsk is
+	// true when the terminal tool_use is an AskUserQuestion or ExitPlanMode
+	// awaiting its result; TrailingQuestion is true when the terminal turn is a
+	// text-only assistant message ending in '?'. Both feed awaiting-overseer
+	// detection.
+	PendingAsk       bool
+	TrailingQuestion bool
 }
 
 // scanLimit is the max single-line size we accept from a transcript. Attachment
@@ -92,6 +100,11 @@ func parseTranscript(r io.Reader) TranscriptStats {
 	}
 	s.ContextPct = ContextPct(s.Model, s.ContextTokens)
 	s.NowDoing = humanizeActivity(lastTool, lastText)
+	// A trailing question is a terminal text-only assistant turn (not mid-turn)
+	// whose last text block ends with '?'. When the turn is mid-turn (a pending
+	// tool_use, or a user message awaiting reply), lastText belongs to an earlier
+	// turn and must not be read as the agent's open question.
+	s.TrailingQuestion = !s.MidTurn && strings.HasSuffix(strings.TrimSpace(lastText), "?")
 	return s
 }
 
@@ -109,10 +122,14 @@ func processLine(line []byte, s *TranscriptStats, lastUsage **tUsage, lastTool *
 	// mode, …) carry no message and never reach here.
 	switch rec.Type {
 	case "user":
+		// A user message (prompt or tool_result) answers any pending ask and
+		// leaves the agent awaiting an assistant reply.
 		s.MidTurn = true
+		s.PendingAsk = false
 		return
 	case "assistant":
-		s.MidTurn = false // set true below if this turn dispatched a tool
+		s.MidTurn = false    // set true below if this turn dispatched a tool
+		s.PendingAsk = false // set true below if the terminal tool is an ask
 	default:
 		return
 	}
@@ -134,6 +151,10 @@ func processLine(line []byte, s *TranscriptStats, lastUsage **tUsage, lastTool *
 		case "tool_use":
 			s.ToolCalls++
 			s.MidTurn = true // awaiting this tool's result
+			// The terminal tool_use determines PendingAsk: an overseer prompt
+			// (AskUserQuestion/ExitPlanMode) sets it, any other tool clears it,
+			// so the last block in the latest assistant turn wins.
+			s.PendingAsk = b.Name == "AskUserQuestion" || b.Name == "ExitPlanMode"
 			if b.Name == "Read" {
 				s.FileReads++
 			}

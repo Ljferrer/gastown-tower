@@ -70,6 +70,46 @@ func TestParseTranscriptMidTurn(t *testing.T) {
 	}
 }
 
+// PendingAsk flags a terminal AskUserQuestion/ExitPlanMode awaiting its result;
+// TrailingQuestion flags a terminal text-only assistant turn ending in '?'. A
+// later user message (the answer) clears both, and a mid-turn tool call is not a
+// trailing question.
+func TestParseTranscriptOverseerSignals(t *testing.T) {
+	const userBlock = `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"go"}]}}`
+	const askTool = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"AskUserQuestion","input":{}}]}}`
+	const planTool = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"ExitPlanMode","input":{}}]}}`
+	const bashTool = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}`
+	const answer = `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"1"}]}}`
+	const question = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Which option do you prefer?"}]}}`
+	const statement = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"All done."}]}}`
+
+	cases := []struct {
+		name          string
+		body          string
+		wantPending   bool
+		wantTrailingQ bool
+	}{
+		{"terminal AskUserQuestion", userBlock + "\n" + askTool, true, false},
+		{"terminal ExitPlanMode", userBlock + "\n" + planTool, true, false},
+		{"ask then answered", userBlock + "\n" + askTool + "\n" + answer, false, false},
+		{"other terminal tool", userBlock + "\n" + bashTool, false, false},
+		{"trailing question text turn", userBlock + "\n" + question, false, true},
+		{"statement text turn", userBlock + "\n" + statement, false, false},
+		{"mid-turn tool is not trailing question", userBlock + "\n" + bashTool, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := parseTranscript(strings.NewReader(tc.body))
+			if s.PendingAsk != tc.wantPending {
+				t.Errorf("PendingAsk = %v, want %v", s.PendingAsk, tc.wantPending)
+			}
+			if s.TrailingQuestion != tc.wantTrailingQ {
+				t.Errorf("TrailingQuestion = %v, want %v", s.TrailingQuestion, tc.wantTrailingQ)
+			}
+		})
+	}
+}
+
 func TestHumanizeActivity(t *testing.T) {
 	cases := []struct {
 		name string

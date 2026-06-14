@@ -231,6 +231,7 @@ var (
 	dimStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	helpStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	churnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#5ad17a")) // green
+	awaitStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#e8a33d")) // orange — awaiting overseer
 	selBar     = lipgloss.NewStyle().Foreground(lipgloss.Color(tower.TownColor)).Bold(true)
 	panelStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("250"))
 )
@@ -586,8 +587,11 @@ func renderRigs(s tower.TownStats) string {
 
 func renderAgent(a tower.Agent, selected bool, gc lipgloss.Color) string {
 	dot := dimStyle.Render("○")
-	if a.Churning {
+	switch a.Status {
+	case tower.StatusChurning:
 		dot = churnStyle.Render("●")
+	case tower.StatusAwaiting:
+		dot = awaitStyle.Render("●")
 	}
 	cursor := "  "
 	name := a.Name
@@ -598,10 +602,15 @@ func renderAgent(a tower.Agent, selected bool, gc lipgloss.Color) string {
 	pct := a.Stats.ContextPct
 	meter := lipgloss.NewStyle().Foreground(gc).Render(bar(pct))
 	activity := a.Stats.NowDoing
-	if !a.Churning {
+	switch a.Status {
+	case tower.StatusAwaiting:
+		activity = awaitStyle.Render("awaiting overseer")
+	case tower.StatusChurning:
+		if a.Turn.Elapsed > 0 {
+			activity = dimStyle.Render(roundDur(a.Turn.Elapsed).String()+" ") + activity
+		}
+	default: // idle
 		activity = dimStyle.Render("idle " + roundDur(a.Idle).String())
-	} else if a.Turn.Elapsed > 0 {
-		activity = dimStyle.Render(roundDur(a.Turn.Elapsed).String()+" ") + activity
 	}
 	hook := ""
 	if a.Hook != "" {

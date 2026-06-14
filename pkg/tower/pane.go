@@ -27,6 +27,22 @@ func paneWorking(pane string) bool {
 	return strings.Contains(pane, workingMarker)
 }
 
+// paneAwaitingRe matches Claude Code's selection-box prompt: the caret cursor on
+// a numbered option, e.g. "❯ 1. Yes" — what's drawn while an AskUserQuestion /
+// ExitPlanMode awaits the overseer's choice.
+var paneAwaitingRe = regexp.MustCompile(`❯\s+\d+\.`)
+
+// paneAwaiting reports whether captured pane content shows the agent paused on a
+// structured prompt to its overseer (a numbered selection box). A working pane
+// is never awaiting: an active turn takes precedence, so the working marker
+// short-circuits to false.
+func paneAwaiting(pane string) bool {
+	if paneWorking(pane) {
+		return false
+	}
+	return paneAwaitingRe.MatchString(pane)
+}
+
 // TurnProgress is the current-turn detail parsed from the spinner line: how long
 // the active turn has been generating and how many output tokens have streamed.
 type TurnProgress struct {

@@ -29,6 +29,36 @@ func TestPaneWorking(t *testing.T) {
 	}
 }
 
+// A numbered selection box reads as awaiting; plain prose or a working pane does
+// not. The working marker always wins so an active turn never reads as awaiting.
+func TestPaneAwaiting(t *testing.T) {
+	selection := `Do you want to proceed?
+❯ 1. Yes
+  2. No, keep planning
+  ⏵⏵ bypass permissions on (shift+tab to cycle)`
+
+	plain := `❯ HEALTH_CHECK: heartbeat stale, respond to confirm responsiveness
+  ⎿  ✓ Heartbeat updated: responsive; idle
+❯`
+
+	working := `· Flambéing… (44s · ↓ 2.0k tokens · thinking)
+❯ 1. Yes
+  esc to interrupt`
+
+	if !paneAwaiting(selection) {
+		t.Error("numbered selection box should read as awaiting")
+	}
+	if paneAwaiting(plain) {
+		t.Error("plain prompt without a numbered box must not read as awaiting")
+	}
+	if paneAwaiting(working) {
+		t.Error("a working pane must never read as awaiting")
+	}
+	if paneAwaiting("") {
+		t.Error("empty pane must not read as awaiting")
+	}
+}
+
 // The spinner line yields current-turn elapsed seconds and streamed token count,
 // handling both bare integers (475) and k-suffixed values (2.0k).
 func TestParseSpinner(t *testing.T) {

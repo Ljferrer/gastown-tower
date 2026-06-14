@@ -13,7 +13,8 @@ type Agent struct {
 	AgentRef
 	TranscriptPath string
 	LastActivity   time.Time
-	Churning       bool
+	Status         AgentStatus   // idle / churning / awaiting-overseer
+	Churning       bool          // web-compat shim: == (Status == StatusChurning)
 	Idle           time.Duration // since last activity
 	Stats          TranscriptStats
 	Hook           string       // active hooked bead ("id: title"), "" when none
@@ -161,12 +162,13 @@ func (c *Collector) Snapshot() (Snapshot, error) {
 		if err != nil {
 			continue
 		}
-		churning, turn := c.churnState(ref, en.prefixes, sessions, mt, now, stats.MidTurn)
+		status, turn := c.agentStatus(ref, en.prefixes, sessions, mt, now, stats)
 		byGroup[ref.Group] = append(byGroup[ref.Group], Agent{
 			AgentRef:       ref,
 			TranscriptPath: tx,
 			LastActivity:   mt,
-			Churning:       churning,
+			Status:         status,
+			Churning:       status == StatusChurning,
 			Turn:           turn,
 			Idle:           now.Sub(mt),
 			Stats:          stats,
@@ -227,35 +229,64 @@ func (c *Collector) fetchEnrichment(now time.Time) enrichment {
 	return en
 }
 
-// churnState reports whether an agent is actively working and, when it is, the
-// current-turn progress. The primary signal is the agent's tmux pane: the
-// working-marker means mid-turn regardless of transcript mtime (a long
-// generate writes nothing to disk until it completes). When no pane is
-// available — unknown rig, dead session, capture failure, or tmux missing — it
-// falls back to the transcript heuristic.
+// agentStatus classifies an agent as idle, churning, or awaiting-overseer and,
+// when churning, returns the current-turn progress. The primary signal is the
+// agent's tmux pane: the working-marker means mid-turn regardless of transcript
+// mtime (a long generate writes nothing to disk until it completes). When no
+// pane is available — unknown rig, dead session, capture failure, or tmux
+// missing — it falls back to the transcript heuristic.
 //
-// The fallback can't see a long generation or a blocking tool call directly:
-// the transcript is written at turn boundaries, so mtime goes quiet exactly
-// when the agent is busiest. midTurn (the last conversation message still
-// awaits a reply) recovers that signal, granting the longer TurnWindow so a
-// mid-turn agent stays churning across a realistic turn/tool duration. A
-// completed turn uses the shorter ChurnWindow quiet window. Either window
-// bounds the lie for a session that died mid-turn; ActiveWindow is the outer
-// cap that drops it entirely.
-func (c *Collector) churnState(ref AgentRef, prefixes map[string]string, sessions map[string]struct{}, mt, now time.Time, midTurn bool) (bool, TurnProgress) {
+// Awaiting-overseer (orange) is gated on role and freshness: only mayor/crew are
+// eligible, and only within ActiveWindow (the signal decays so a long-dead
+// session doesn't linger orange). When eligible and fresh, an agent is awaiting
+// if it shows a structured pane prompt (paneAwaiting), a pending
+// AskUserQuestion/ExitPlanMode (PendingAsk), or a trailing-question text turn
+// (TrailingQuestion). A working turn always wins over awaiting.
+//
+// The churn fallback can't see a long generation or a blocking tool call
+// directly: the transcript is written at turn boundaries, so mtime goes quiet
+// exactly when the agent is busiest. MidTurn (the last conversation message
+// still awaits a reply) recovers that signal, granting the longer TurnWindow so
+// a mid-turn agent stays churning across a realistic turn/tool duration. A
+// completed turn uses the shorter ChurnWindow quiet window. Either window bounds
+// the lie for a session that died mid-turn; ActiveWindow is the outer cap that
+// drops it entirely. In the no-pane fallback, awaiting takes precedence over
+// mtime-churn so a quiet agent sitting on a question reads orange, not green.
+func (c *Collector) agentStatus(ref AgentRef, prefixes map[string]string, sessions map[string]struct{}, mt, now time.Time, stats TranscriptStats) (AgentStatus, TurnProgress) {
+	fresh := now.Sub(mt) <= c.ActiveWindow
+	eligible := overseerEligible(ref.Role)
+	// Transcript-tail awaiting signal (pane-independent), gated on eligibility
+	// and freshness. The pane path adds paneAwaiting on top of this.
+	txAwaiting := eligible && fresh && (stats.PendingAsk || stats.TrailingQuestion)
+
 	if name, ok := tmuxSession(ref, prefixes); ok && c.capturePane != nil {
 		if _, live := sessions[name]; live {
 			if pane, err := c.capturePane(name); err == nil {
 				turn, _ := parseSpinner(pane)
-				return paneWorking(pane), turn
+				switch {
+				case paneWorking(pane):
+					return StatusChurning, turn
+				case txAwaiting || (eligible && fresh && paneAwaiting(pane)):
+					return StatusAwaiting, TurnProgress{}
+				default:
+					return StatusIdle, TurnProgress{}
+				}
 			}
 		}
 	}
+
+	// No-pane fallback: awaiting takes precedence over mtime-churn.
+	if txAwaiting {
+		return StatusAwaiting, TurnProgress{}
+	}
 	window := c.ChurnWindow
-	if midTurn {
+	if stats.MidTurn {
 		window = c.TurnWindow
 	}
-	return now.Sub(mt) <= window, TurnProgress{}
+	if now.Sub(mt) <= window {
+		return StatusChurning, TurnProgress{}
+	}
+	return StatusIdle, TurnProgress{}
 }
 
 // latestTranscript returns the most-recently-modified *.jsonl in dir.

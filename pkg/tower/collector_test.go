@@ -124,22 +124,22 @@ func TestChurnStateFromPane(t *testing.T) {
 	working := "✳ Honking… (9s · ↓ 475 tokens)\n  esc to interrupt"
 	idle := "❯ done\n  ⏵⏵ bypass permissions on · ← for agents"
 
-	c := &Collector{ChurnWindow: 8 * time.Second}
+	c := &Collector{ChurnWindow: 8 * time.Second, ActiveWindow: 30 * time.Minute}
 
 	// Working pane overrides a stale mtime.
 	c.capturePane = func(string) (string, error) { return working, nil }
-	churning, tp := c.churnState(ref, prefixes, sessions, staleMtime, now, false)
-	if !churning {
-		t.Error("working pane with stale mtime should read as churning")
+	status, tp := c.agentStatus(ref, prefixes, sessions, staleMtime, now, TranscriptStats{})
+	if status != StatusChurning {
+		t.Errorf("working pane with stale mtime should read churning, got %v", status)
 	}
 	if tp.Tokens != 475 || tp.Elapsed != 9*time.Second {
 		t.Errorf("turn progress not parsed: %+v", tp)
 	}
 
-	// Idle pane overrides a fresh mtime.
+	// Idle pane (no awaiting signals) overrides a fresh mtime.
 	c.capturePane = func(string) (string, error) { return idle, nil }
-	if churning, _ := c.churnState(ref, prefixes, sessions, freshMtime, now, false); churning {
-		t.Error("idle pane with fresh mtime should read as idle")
+	if status, _ := c.agentStatus(ref, prefixes, sessions, freshMtime, now, TranscriptStats{}); status != StatusIdle {
+		t.Errorf("idle pane with fresh mtime should read idle, got %v", status)
 	}
 }
 
@@ -154,24 +154,25 @@ func TestChurnStateFallsBackToMtime(t *testing.T) {
 	ref := AgentRef{Name: "mayor", Group: townGroup}
 
 	c := &Collector{
-		ChurnWindow: 8 * time.Second,
-		TurnWindow:  5 * time.Minute,
-		capturePane: func(string) (string, error) { return "", errors.New("no pane") },
+		ChurnWindow:  8 * time.Second,
+		TurnWindow:   5 * time.Minute,
+		ActiveWindow: 30 * time.Minute,
+		capturePane:  func(string) (string, error) { return "", errors.New("no pane") },
 	}
 
 	// Session not in the live set -> mtime fallback (fresh = churning).
-	if churning, _ := c.churnState(ref, prefixes, map[string]struct{}{}, fresh, now, false); !churning {
-		t.Error("missing session with fresh mtime should fall back to churning")
+	if status, _ := c.agentStatus(ref, prefixes, map[string]struct{}{}, fresh, now, TranscriptStats{}); status != StatusChurning {
+		t.Errorf("missing session with fresh mtime should fall back to churning, got %v", status)
 	}
 	// Capture error -> mtime fallback (stale = idle).
 	sessions := map[string]struct{}{"hq-mayor": {}}
-	if churning, _ := c.churnState(ref, prefixes, sessions, stale, now, false); churning {
-		t.Error("capture error with stale mtime should fall back to idle")
+	if status, _ := c.agentStatus(ref, prefixes, sessions, stale, now, TranscriptStats{}); status == StatusChurning {
+		t.Errorf("capture error with stale mtime should fall back to idle, got %v", status)
 	}
 	// Unknown rig (no prefix) -> mtime fallback.
 	ghost := AgentRef{Name: "x", Rig: "Nope", Group: "Nope"}
-	if churning, _ := c.churnState(ghost, prefixes, sessions, fresh, now, false); !churning {
-		t.Error("unknown rig with fresh mtime should fall back to churning")
+	if status, _ := c.agentStatus(ghost, prefixes, sessions, fresh, now, TranscriptStats{}); status != StatusChurning {
+		t.Errorf("unknown rig with fresh mtime should fall back to churning, got %v", status)
 	}
 }
 
@@ -186,24 +187,91 @@ func TestChurnStateMidTurnUsesTurnWindow(t *testing.T) {
 	sessions := map[string]struct{}{"hq-mayor": {}}
 
 	c := &Collector{
-		ChurnWindow: 8 * time.Second,
-		TurnWindow:  5 * time.Minute,
-		capturePane: func(string) (string, error) { return "", errors.New("no pane") },
+		ChurnWindow:  8 * time.Second,
+		TurnWindow:   5 * time.Minute,
+		ActiveWindow: 30 * time.Minute,
+		capturePane:  func(string) (string, error) { return "", errors.New("no pane") },
 	}
 
 	// Quiet for 1 minute: past ChurnWindow but mid-turn -> churning.
 	midGen := now.Add(-1 * time.Minute)
-	if churning, _ := c.churnState(ref, prefixes, sessions, midGen, now, true); !churning {
-		t.Error("mid-turn agent quiet within TurnWindow should read as churning")
+	if status, _ := c.agentStatus(ref, prefixes, sessions, midGen, now, TranscriptStats{MidTurn: true}); status != StatusChurning {
+		t.Errorf("mid-turn agent quiet within TurnWindow should read churning, got %v", status)
 	}
 	// Same staleness with a completed turn -> idle (only TurnWindow rescues it).
-	if churning, _ := c.churnState(ref, prefixes, sessions, midGen, now, false); churning {
-		t.Error("completed turn beyond ChurnWindow should read as idle")
+	if status, _ := c.agentStatus(ref, prefixes, sessions, midGen, now, TranscriptStats{}); status == StatusChurning {
+		t.Errorf("completed turn beyond ChurnWindow should read idle, got %v", status)
 	}
 	// Mid-turn but quiet beyond TurnWindow (likely a dead session) -> idle.
 	dead := now.Add(-6 * time.Minute)
-	if churning, _ := c.churnState(ref, prefixes, sessions, dead, now, true); churning {
-		t.Error("mid-turn quiet beyond TurnWindow should read as idle")
+	if status, _ := c.agentStatus(ref, prefixes, sessions, dead, now, TranscriptStats{MidTurn: true}); status == StatusChurning {
+		t.Errorf("mid-turn quiet beyond TurnWindow should read idle, got %v", status)
+	}
+}
+
+// Awaiting-overseer is detected for eligible roles via the live pane: an idle
+// pane showing a numbered selection box reads orange, while a working pane stays
+// green even when the transcript carries a pending-ask signal.
+func TestAgentStatusAwaitingFromPane(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	fresh := now.Add(-2 * time.Second)
+	prefixes := map[string]string{".": "hq"}
+	sessions := map[string]struct{}{"hq-mayor": {}}
+	ref := AgentRef{Name: "mayor", Role: "mayor", Group: townGroup}
+
+	c := &Collector{ChurnWindow: 8 * time.Second, TurnWindow: 5 * time.Minute, ActiveWindow: 30 * time.Minute}
+
+	// Idle pane with a selection box -> awaiting.
+	c.capturePane = func(string) (string, error) {
+		return "Proceed?\n❯ 1. Yes\n  2. No\n  ⏵⏵ bypass permissions on", nil
+	}
+	if status, _ := c.agentStatus(ref, prefixes, sessions, fresh, now, TranscriptStats{}); status != StatusAwaiting {
+		t.Errorf("selection-box pane should read awaiting, got %v", status)
+	}
+
+	// Working pane wins over a pending-ask transcript signal.
+	c.capturePane = func(string) (string, error) {
+		return "✳ Honking… (9s · ↓ 475 tokens)\n  esc to interrupt", nil
+	}
+	if status, _ := c.agentStatus(ref, prefixes, sessions, fresh, now, TranscriptStats{PendingAsk: true}); status != StatusChurning {
+		t.Errorf("working pane should read churning despite PendingAsk, got %v", status)
+	}
+}
+
+// In the no-pane fallback, an eligible+fresh agent with a transcript awaiting
+// signal reads orange, taking precedence over the mtime churn window. The role
+// gate and freshness gate both suppress it.
+func TestAgentStatusAwaitingFallback(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	fresh := now.Add(-2 * time.Second)       // within ChurnWindow
+	decayed := now.Add(-45 * time.Minute)    // beyond ActiveWindow
+	prefixes := map[string]string{".": "hq"} // mayor resolves to hq-mayor
+	noSessions := map[string]struct{}{}      // force the no-pane fallback
+	mayor := AgentRef{Name: "mayor", Role: "mayor", Group: townGroup}
+	polecat := AgentRef{Name: "furiosa", Role: "polecat", Rig: "GigaClip", Group: "GigaClip"}
+
+	c := &Collector{
+		ChurnWindow:  8 * time.Second,
+		TurnWindow:   5 * time.Minute,
+		ActiveWindow: 30 * time.Minute,
+		capturePane:  func(string) (string, error) { return "", errors.New("no pane") },
+	}
+
+	// Eligible + fresh + pending ask -> awaiting, beating the churn window.
+	if status, _ := c.agentStatus(mayor, prefixes, noSessions, fresh, now, TranscriptStats{PendingAsk: true}); status != StatusAwaiting {
+		t.Errorf("eligible fresh pending-ask should read awaiting, got %v", status)
+	}
+	// Trailing question is also an awaiting signal.
+	if status, _ := c.agentStatus(mayor, prefixes, noSessions, fresh, now, TranscriptStats{TrailingQuestion: true}); status != StatusAwaiting {
+		t.Errorf("eligible fresh trailing-question should read awaiting, got %v", status)
+	}
+	// Role gate: a polecat with the same signal is never awaiting (fresh -> churning).
+	if status, _ := c.agentStatus(polecat, prefixes, noSessions, fresh, now, TranscriptStats{PendingAsk: true}); status == StatusAwaiting {
+		t.Errorf("ineligible polecat must not read awaiting, got %v", status)
+	}
+	// Freshness gate: past ActiveWindow the awaiting signal decays to idle.
+	if status, _ := c.agentStatus(mayor, prefixes, noSessions, decayed, now, TranscriptStats{PendingAsk: true}); status != StatusIdle {
+		t.Errorf("decayed pending-ask should read idle, got %v", status)
 	}
 }
 
