@@ -287,6 +287,7 @@ func TestProvablyDead(t *testing.T) {
 	mayor := AgentRef{Name: "mayor", Group: townGroup}                                        // -> hq-mayor
 	polecat := AgentRef{Name: "furiosa", Role: "polecat", Rig: "GigaClip", Group: "GigaClip"} // -> gc-furiosa
 	crew := AgentRef{Name: "Quasimodo", Role: "crew", Rig: "GigaClip", Group: "GigaClip"}     // -> gc-crew-Quasimodo
+	seat := AgentRef{Name: "Mary", Role: "seat", Rig: "GigaClip", Group: "GigaClip"}          // -> gc-seat-mary
 	unknown := AgentRef{Name: "x", Rig: "Nope", Group: "Nope"}                                // unresolvable
 
 	tests := []struct {
@@ -300,6 +301,8 @@ func TestProvablyDead(t *testing.T) {
 		{"session present -> alive", polecat, map[string]struct{}{"gc-furiosa": {}}, false},
 		{"crew session present -> alive", crew, map[string]struct{}{"gc-crew-Quasimodo": {}}, false},
 		{"crew misnamed (no role qualifier) -> dead", crew, map[string]struct{}{"gc-Quasimodo": {}}, true},
+		{"seat session present (lowercased) -> alive", seat, map[string]struct{}{"gc-seat-mary": {}}, false},
+		{"seat matched with dir case -> dead", seat, map[string]struct{}{"gc-seat-Mary": {}}, true},
 		{"nil set (tmux hiccup) -> not provable", polecat, nil, false},
 		{"unknown rig -> not provable", unknown, map[string]struct{}{}, false},
 		{"town agent omitted -> dead", mayor, map[string]struct{}{"hq-other": {}}, true},
@@ -386,6 +389,38 @@ func TestSnapshotDropsDeadAgents(t *testing.T) {
 		}
 		if snap.Stats.Active != 1 {
 			t.Errorf("Active = %d, want 1 (live crew must not be dropped)", snap.Stats.Active)
+		}
+	})
+
+	// gtt-urs regression: a live Nun audit seat must appear in the snapshot. Its
+	// worktree dir keeps the proper name (seats/Mary) but gt names the session
+	// gtt-seat-mary (lowercased), so the liveness gate must resolve to that — else
+	// the seat is dropped as dead and stays invisible in the AGENTS panel.
+	t.Run("live seat agent stays present (gtt-urs)", func(t *testing.T) {
+		dir := t.TempDir()
+		writeTranscriptDir(t, dir, townSlug, "GigaClip-seats-Mary-GigaClip")
+		c := newCollector(dir, map[string]struct{}{"gc-seat-mary": {}})
+		snap, err := c.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snap.Stats.Active != 1 {
+			t.Fatalf("Active = %d, want 1 (live seat must not be dropped)", snap.Stats.Active)
+		}
+		// It must surface as a seat row grouped under its rig, named for the Nun.
+		var seat *Agent
+		for gi := range snap.Groups {
+			for ai := range snap.Groups[gi].Agents {
+				if snap.Groups[gi].Agents[ai].Role == "seat" {
+					seat = &snap.Groups[gi].Agents[ai]
+				}
+			}
+		}
+		if seat == nil {
+			t.Fatal("no seat agent in snapshot")
+		}
+		if seat.Name != "Mary" || seat.Group != "GigaClip" {
+			t.Errorf("seat = {Name:%q Group:%q}, want {Mary GigaClip}", seat.Name, seat.Group)
 		}
 	})
 

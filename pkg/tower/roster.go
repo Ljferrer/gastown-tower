@@ -56,6 +56,18 @@ func classifyPath(segments []string) (AgentRef, bool) {
 				name = segments[2]
 			}
 			return AgentRef{Name: name, Role: "crew", Rig: rig, Group: rig, Addr: rig + "/crew/" + name}, true
+		case "seats":
+			// Nun audit seats are spawned per panel under <rig>/seats/<Name>/<repo>,
+			// mirroring the polecat worktree layout. The dir keeps the Nun's proper
+			// name (e.g. "Mary"); tmuxSession lowercases it for the live session
+			// (gtt-seat-mary). Without this case the seat falls to the "rig" default
+			// below, whose session never resolves, so the liveness gate drops it and
+			// the seat stays invisible in the AGENTS panel (gtt-urs).
+			name := "seat"
+			if len(segments) >= 3 {
+				name = segments[2]
+			}
+			return AgentRef{Name: name, Role: "seat", Rig: rig, Group: rig, Addr: rig + "/seats/" + name}, true
 		default:
 			return AgentRef{Name: rig + "/" + sub, Role: "rig", Rig: rig, Group: rig}, true
 		}

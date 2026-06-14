@@ -17,6 +17,10 @@ func TestClassifyPath(t *testing.T) {
 		{[]string{"GigaClip", "witness"}, AgentRef{Name: "witness", Role: "witness", Rig: "GigaClip", Group: "GigaClip", Addr: "GigaClip/witness"}, true},
 		{[]string{"GigaClip", "refinery", "rig"}, AgentRef{Name: "refinery", Role: "refinery", Rig: "GigaClip", Group: "GigaClip", Addr: "GigaClip/refinery"}, true},
 		{[]string{"GigaClip", "polecats", "jasper", "GigaClip"}, AgentRef{Name: "jasper", Role: "polecat", Rig: "GigaClip", Group: "GigaClip", Addr: "GigaClip/polecats/jasper"}, true},
+		{[]string{"GigaClip", "crew", "Quasimodo"}, AgentRef{Name: "Quasimodo", Role: "crew", Rig: "GigaClip", Group: "GigaClip", Addr: "GigaClip/crew/Quasimodo"}, true},
+		// Nun audit seats: <rig>/seats/<Name>/<repo>, proper name preserved here.
+		{[]string{"GigaClip", "seats", "Mary", "GigaClip"}, AgentRef{Name: "Mary", Role: "seat", Rig: "GigaClip", Group: "GigaClip", Addr: "GigaClip/seats/Mary"}, true},
+		{[]string{"GigaClip", "seats", "Agnes", "GigaClip"}, AgentRef{Name: "Agnes", Role: "seat", Rig: "GigaClip", Group: "GigaClip", Addr: "GigaClip/seats/Agnes"}, true},
 		{[]string{}, AgentRef{}, false},
 	}
 	for _, c := range cases {

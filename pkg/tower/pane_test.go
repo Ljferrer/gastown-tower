@@ -123,6 +123,9 @@ func TestTmuxSession(t *testing.T) {
 		{AgentRef{Name: "witness", Role: "witness", Rig: "GigaClip", Group: "GigaClip"}, "gc-witness", true},
 		// gt qualifies crew sessions with their role: <prefix>-crew-<name>.
 		{AgentRef{Name: "Quasimodo", Role: "crew", Rig: "GasTownTower", Group: "GasTownTower"}, "gtt-crew-Quasimodo", true},
+		// Nun seats qualify with "seat-" AND lowercase: dir seats/Mary -> gtt-seat-mary.
+		{AgentRef{Name: "Mary", Role: "seat", Rig: "GasTownTower", Group: "GasTownTower"}, "gtt-seat-mary", true},
+		{AgentRef{Name: "Agnes", Role: "seat", Rig: "GigaClip", Group: "GigaClip"}, "gc-seat-agnes", true},
 		{AgentRef{Name: "ghost", Role: "polecat", Rig: "Unknown", Group: "Unknown"}, "", false},
 	}
 	for _, tt := range tests {

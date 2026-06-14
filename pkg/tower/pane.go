@@ -79,9 +79,12 @@ func parseSpinner(pane string) (TurnProgress, bool) {
 // ok=false when the agent's rig has no known prefix.
 //
 // gt qualifies CREW sessions with their role segment (<prefix>-crew-<name>) but
-// drops the "polecats" segment for polecats. We mirror that asymmetry so a live
-// crew session resolves to its real name; otherwise the liveness gate
-// (provablyDead) misreads a live crew agent as dead and drops it (gtt-qp6).
+// drops the "polecats" segment for polecats. SEAT (Nun audit) sessions are
+// qualified too AND lowercased (<prefix>-seat-<name>): the worktree dir keeps the
+// proper Nun name (seats/Mary) but the live session is gtt-seat-mary. We mirror
+// both asymmetries so a live crew/seat session resolves to its real name;
+// otherwise the liveness gate (provablyDead) misreads it as dead and drops it
+// (crew: gtt-qp6, seat: gtt-urs).
 func tmuxSession(ref AgentRef, prefixes map[string]string) (string, bool) {
 	key := ref.Rig
 	if ref.Group == townGroup {
@@ -97,6 +100,13 @@ func tmuxSession(ref AgentRef, prefixes map[string]string) (string, bool) {
 	}
 	if ref.Role == "crew" {
 		leaf = "crew-" + leaf
+	}
+	// Nun audit seats qualify with a "seat-" segment AND lowercase the name: the
+	// worktree dir keeps the proper Nun name (seats/Mary) but gt names the live
+	// session gtt-seat-mary. Matching the dir's case here would miss the session
+	// and the liveness gate would drop a live seat as dead (gtt-urs).
+	if ref.Role == "seat" {
+		leaf = "seat-" + strings.ToLower(leaf)
 	}
 	return prefix + "-" + leaf, true
 }
