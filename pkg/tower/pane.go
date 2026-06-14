@@ -77,6 +77,11 @@ func parseSpinner(pane string) (TurnProgress, bool) {
 // rig-path -> prefix map. Town agents key on "." (prefix "hq"); rig agents key
 // on their rig. The leaf of a slashed name is used (deacon/boot -> hq-boot).
 // ok=false when the agent's rig has no known prefix.
+//
+// gt qualifies CREW sessions with their role segment (<prefix>-crew-<name>) but
+// drops the "polecats" segment for polecats. We mirror that asymmetry so a live
+// crew session resolves to its real name; otherwise the liveness gate
+// (provablyDead) misreads a live crew agent as dead and drops it (gtt-qp6).
 func tmuxSession(ref AgentRef, prefixes map[string]string) (string, bool) {
 	key := ref.Rig
 	if ref.Group == townGroup {
@@ -89,6 +94,9 @@ func tmuxSession(ref AgentRef, prefixes map[string]string) (string, bool) {
 	leaf := ref.Name
 	if i := strings.LastIndex(leaf, "/"); i >= 0 {
 		leaf = leaf[i+1:]
+	}
+	if ref.Role == "crew" {
+		leaf = "crew-" + leaf
 	}
 	return prefix + "-" + leaf, true
 }

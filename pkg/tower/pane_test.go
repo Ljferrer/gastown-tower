@@ -119,9 +119,11 @@ func TestTmuxSession(t *testing.T) {
 	}{
 		{AgentRef{Name: "mayor", Group: townGroup}, "hq-mayor", true},
 		{AgentRef{Name: "deacon/boot", Group: townGroup}, "hq-boot", true},
-		{AgentRef{Name: "furiosa", Rig: "GasTownTower", Group: "GasTownTower"}, "gtt-furiosa", true},
-		{AgentRef{Name: "witness", Rig: "GigaClip", Group: "GigaClip"}, "gc-witness", true},
-		{AgentRef{Name: "ghost", Rig: "Unknown", Group: "Unknown"}, "", false},
+		{AgentRef{Name: "furiosa", Role: "polecat", Rig: "GasTownTower", Group: "GasTownTower"}, "gtt-furiosa", true},
+		{AgentRef{Name: "witness", Role: "witness", Rig: "GigaClip", Group: "GigaClip"}, "gc-witness", true},
+		// gt qualifies crew sessions with their role: <prefix>-crew-<name>.
+		{AgentRef{Name: "Quasimodo", Role: "crew", Rig: "GasTownTower", Group: "GasTownTower"}, "gtt-crew-Quasimodo", true},
+		{AgentRef{Name: "ghost", Role: "polecat", Rig: "Unknown", Group: "Unknown"}, "", false},
 	}
 	for _, tt := range tests {
 		got, ok := tmuxSession(tt.ref, prefixes)

@@ -284,9 +284,10 @@ func TestAgentStatusAwaitingFallback(t *testing.T) {
 // the mtime fallback.
 func TestProvablyDead(t *testing.T) {
 	prefixes := map[string]string{".": "hq", "GigaClip": "gc"}
-	mayor := AgentRef{Name: "mayor", Group: townGroup}                       // -> hq-mayor
-	polecat := AgentRef{Name: "furiosa", Rig: "GigaClip", Group: "GigaClip"} // -> gc-furiosa
-	unknown := AgentRef{Name: "x", Rig: "Nope", Group: "Nope"}               // unresolvable
+	mayor := AgentRef{Name: "mayor", Group: townGroup}                                        // -> hq-mayor
+	polecat := AgentRef{Name: "furiosa", Role: "polecat", Rig: "GigaClip", Group: "GigaClip"} // -> gc-furiosa
+	crew := AgentRef{Name: "Quasimodo", Role: "crew", Rig: "GigaClip", Group: "GigaClip"}     // -> gc-crew-Quasimodo
+	unknown := AgentRef{Name: "x", Rig: "Nope", Group: "Nope"}                                // unresolvable
 
 	tests := []struct {
 		name     string
@@ -297,6 +298,8 @@ func TestProvablyDead(t *testing.T) {
 		{"non-nil set omits session -> dead", polecat, map[string]struct{}{"gc-other": {}}, true},
 		{"empty non-nil set -> dead", polecat, map[string]struct{}{}, true},
 		{"session present -> alive", polecat, map[string]struct{}{"gc-furiosa": {}}, false},
+		{"crew session present -> alive", crew, map[string]struct{}{"gc-crew-Quasimodo": {}}, false},
+		{"crew misnamed (no role qualifier) -> dead", crew, map[string]struct{}{"gc-Quasimodo": {}}, true},
 		{"nil set (tmux hiccup) -> not provable", polecat, nil, false},
 		{"unknown rig -> not provable", unknown, map[string]struct{}{}, false},
 		{"town agent omitted -> dead", mayor, map[string]struct{}{"hq-other": {}}, true},
@@ -367,6 +370,22 @@ func TestSnapshotDropsDeadAgents(t *testing.T) {
 		}
 		if snap.Stats.Churning != 1 {
 			t.Errorf("Churning = %d, want 1 (only the live agent)", snap.Stats.Churning)
+		}
+	})
+
+	// gtt-qp6 regression: a live crew agent must stay present. gt names crew
+	// sessions <prefix>-crew-<name>; the liveness gate must resolve to that and
+	// NOT read the agent as dead when its real session is in the live set.
+	t.Run("live crew agent stays present (gtt-qp6)", func(t *testing.T) {
+		dir := t.TempDir()
+		writeTranscriptDir(t, dir, townSlug, "GigaClip-crew-Quasimodo")
+		c := newCollector(dir, map[string]struct{}{"gc-crew-Quasimodo": {}})
+		snap, err := c.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snap.Stats.Active != 1 {
+			t.Errorf("Active = %d, want 1 (live crew must not be dropped)", snap.Stats.Active)
 		}
 	})
 
