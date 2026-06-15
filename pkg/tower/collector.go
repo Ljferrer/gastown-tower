@@ -184,7 +184,15 @@ func (c *Collector) Snapshot() (Snapshot, error) {
 			continue
 		}
 		tx, mt, ok := latestTranscript(filepath.Join(c.ProjectsDir, e.Name()))
-		if !ok || now.Sub(mt) > c.ActiveWindow {
+		if !ok {
+			continue // no transcript at all; can't render stats
+		}
+		// ActiveWindow culls stale agents, but only when liveness is UNPROVABLE
+		// (nil session set from a tmux hiccup, or an unresolvable rig) — its
+		// original safety purpose. A provably-live session stays visible (rendered
+		// idle, with its real idle duration) regardless of how long its transcript
+		// has been quiet, matching `gt status`, which shows live agents indefinitely.
+		if !provablyLive(ref, en.prefixes, sessions) && now.Sub(mt) > c.ActiveWindow {
 			continue
 		}
 		stats, err := ParseTranscript(tx)
@@ -275,6 +283,27 @@ func provablyDead(ref AgentRef, prefixes map[string]string, sessions map[string]
 	}
 	_, live := sessions[name]
 	return !live
+}
+
+// provablyLive reports whether the live tmux session set proves this agent's
+// session is present. It is the affirmative counterpart to provablyDead: true
+// only when the tmux query SUCCEEDED (non-nil set), the agent's session name
+// RESOLVES (known rig), and that name is PRESENT in the set. A nil set (tmux
+// hiccup) or an unresolvable rig leaves liveness unproven. Presence uses this to
+// exempt confirmed-live agents from the ActiveWindow mtime cull, so a live agent
+// idling on its hook stays visible instead of vanishing after the transcript
+// goes quiet — note provablyLive and provablyDead are NOT exhaustive: when
+// liveness is unprovable both return false.
+func provablyLive(ref AgentRef, prefixes map[string]string, sessions map[string]struct{}) bool {
+	if sessions == nil {
+		return false // tmux query failed; liveness unprovable
+	}
+	name, ok := tmuxSession(ref, prefixes)
+	if !ok {
+		return false // unknown rig; can't resolve a session name to check
+	}
+	_, live := sessions[name]
+	return live
 }
 
 // agentStatus classifies an agent as idle, churning, or awaiting-overseer and,

@@ -316,6 +316,42 @@ func TestProvablyDead(t *testing.T) {
 	}
 }
 
+// provablyLive is the affirmative liveness check that exempts confirmed-live
+// agents from the ActiveWindow mtime cull: true only when the tmux query
+// SUCCEEDED (non-nil set), the session name RESOLVES (known rig), and that name
+// is PRESENT. A nil set (tmux hiccup) or an unresolvable rig leaves liveness
+// unproven. It is NOT the negation of provablyDead: when liveness is unprovable,
+// both return false.
+func TestProvablyLive(t *testing.T) {
+	prefixes := map[string]string{".": "hq", "GigaClip": "gc"}
+	mayor := AgentRef{Name: "mayor", Group: townGroup}                                        // -> hq-mayor
+	polecat := AgentRef{Name: "furiosa", Role: "polecat", Rig: "GigaClip", Group: "GigaClip"} // -> gc-furiosa
+	crew := AgentRef{Name: "Quasimodo", Role: "crew", Rig: "GigaClip", Group: "GigaClip"}     // -> gc-crew-Quasimodo
+	unknown := AgentRef{Name: "x", Rig: "Nope", Group: "Nope"}                                // unresolvable
+
+	tests := []struct {
+		name     string
+		ref      AgentRef
+		sessions map[string]struct{}
+		want     bool
+	}{
+		{"session present -> live", polecat, map[string]struct{}{"gc-furiosa": {}}, true},
+		{"crew session present -> live", crew, map[string]struct{}{"gc-crew-Quasimodo": {}}, true},
+		{"town agent present -> live", mayor, map[string]struct{}{"hq-mayor": {}}, true},
+		{"non-nil set omits session -> not live", polecat, map[string]struct{}{"gc-other": {}}, false},
+		{"empty non-nil set -> not live", polecat, map[string]struct{}{}, false},
+		{"nil set (tmux hiccup) -> not provable", polecat, nil, false},
+		{"unknown rig -> not provable", unknown, map[string]struct{}{"gc-furiosa": {}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := provablyLive(tt.ref, prefixes, tt.sessions); got != tt.want {
+				t.Errorf("provablyLive = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 // writeTranscriptDir creates a project transcript dir for an agent at the given
 // relative path segments (below the town slug) with a single fresh *.jsonl, so
 // Snapshot discovers it. Returns nothing; fails the test on error.
@@ -466,6 +502,102 @@ func TestSnapshotDropsDeadAgents(t *testing.T) {
 		}
 		if snap.Stats.Active != 0 {
 			t.Errorf("Active = %d, want 0 (all sessions dead after gt down --all)", snap.Stats.Active)
+		}
+	})
+}
+
+// gtt-m70 regression: the ActiveWindow mtime cull must NOT drop a provably-live
+// session. Before the fix, an agent idling on its hook past ActiveWindow (30m)
+// silently vanished from the tower even though `gt status` still showed it. A
+// confirmed-live session stays present (rendered idle); the cull only applies
+// when liveness is UNPROVABLE (nil set or unknown rig), preserving the original
+// gt-down safety behavior.
+func TestSnapshotKeepsLiveIdleAgents(t *testing.T) {
+	townRoot := "/town"
+	townSlug := slugify(townRoot)
+	prefixes := map[string]string{"GigaClip": "gc"}
+
+	// now is pinned 2h ahead of the freshly-written transcripts so every agent is
+	// idle well beyond the 30m ActiveWindow.
+	newCollector := func(projectsDir string, sessions map[string]struct{}, now time.Time) *Collector {
+		return &Collector{
+			TownRoot:       townRoot,
+			ProjectsDir:    projectsDir,
+			ChurnWindow:    8 * time.Second,
+			TurnWindow:     5 * time.Minute,
+			ActiveWindow:   30 * time.Minute,
+			EnrichTTL:      15 * time.Second,
+			now:            func() time.Time { return now },
+			loadReputation: func(string) (Reputation, error) { return Reputation{}, nil },
+			loadMail:       func(string) (Mail, error) { return Mail{}, nil },
+			loadHooks:      func(string) (map[string]string, error) { return nil, nil },
+			loadPrefixes:   func(string) (map[string]string, error) { return prefixes, nil },
+			listSessions:   func() (map[string]struct{}, error) { return sessions, nil },
+			capturePane:    func(string) (string, error) { return "", errors.New("no pane") },
+		}
+	}
+
+	// (1) Provably-live session idle beyond ActiveWindow stays present, rendered
+	// idle with its real idle duration.
+	t.Run("provably-live idle beyond ActiveWindow stays present", func(t *testing.T) {
+		dir := t.TempDir()
+		writeTranscriptDir(t, dir, townSlug, "GigaClip-polecats-furiosa")
+		now := time.Now().Add(2 * time.Hour) // ~2h past the transcript mtime
+		c := newCollector(dir, map[string]struct{}{"gc-furiosa": {}}, now)
+		snap, err := c.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snap.Stats.Active != 1 {
+			t.Fatalf("Active = %d, want 1 (live-but-idle agent must stay visible)", snap.Stats.Active)
+		}
+		var agent *Agent
+		for gi := range snap.Groups {
+			for ai := range snap.Groups[gi].Agents {
+				if snap.Groups[gi].Agents[ai].Name == "furiosa" {
+					agent = &snap.Groups[gi].Agents[ai]
+				}
+			}
+		}
+		if agent == nil {
+			t.Fatal("no furiosa agent in snapshot")
+		}
+		if agent.Status != StatusIdle {
+			t.Errorf("Status = %v, want idle (live but quiet transcript)", agent.Status)
+		}
+		if agent.Idle < 90*time.Minute {
+			t.Errorf("Idle = %v, want its real (large) idle duration", agent.Idle)
+		}
+	})
+
+	// (2a) Liveness unprovable via nil session set + idle beyond ActiveWindow ->
+	// dropped (regression guard for the original gt-down behavior).
+	t.Run("nil set idle beyond ActiveWindow still drops", func(t *testing.T) {
+		dir := t.TempDir()
+		writeTranscriptDir(t, dir, townSlug, "GigaClip-polecats-furiosa")
+		now := time.Now().Add(2 * time.Hour)
+		c := newCollector(dir, nil, now) // tmux hiccup: liveness unprovable
+		snap, err := c.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snap.Stats.Active != 0 {
+			t.Errorf("Active = %d, want 0 (unprovable + stale must be culled)", snap.Stats.Active)
+		}
+	})
+
+	// (2b) Liveness unprovable via unknown rig + idle beyond ActiveWindow -> dropped.
+	t.Run("unknown rig idle beyond ActiveWindow still drops", func(t *testing.T) {
+		dir := t.TempDir()
+		writeTranscriptDir(t, dir, townSlug, "Ghost-polecats-spectre")
+		now := time.Now().Add(2 * time.Hour)
+		c := newCollector(dir, map[string]struct{}{"gc-furiosa": {}}, now) // non-nil, but rig unknown
+		snap, err := c.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snap.Stats.Active != 0 {
+			t.Errorf("Active = %d, want 0 (unresolvable rig + stale must be culled)", snap.Stats.Active)
 		}
 	})
 }
