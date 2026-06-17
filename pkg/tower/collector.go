@@ -1,6 +1,8 @@
 package tower
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -142,6 +144,25 @@ func NewCollector(townRoot string) *Collector {
 // place. Call before Snapshot; not safe to race with a live poll.
 func (c *Collector) SetOverseerAgents(addrs []string) {
 	c.overseer = c.overseer.withOverride(addrs)
+}
+
+// CapturePane returns the live tmux pane text for the given agent's session. It
+// reuses the same socket-bound capture and the cached rig->prefix map (from
+// routes.jsonl) that drive churn detection, resolving the session name via
+// tmuxSession — so the TUI never duplicates the tmux wiring. It errors when the
+// agent's rig has no known session prefix, when no capture func is wired, or
+// when the underlying tmux capture fails (no live session, tmux missing); the
+// caller renders a placeholder on any error.
+func (c *Collector) CapturePane(a Agent) (string, error) {
+	prefixes := c.fetchEnrichment(c.now()).prefixes
+	name, ok := tmuxSession(a.AgentRef, prefixes)
+	if !ok {
+		return "", fmt.Errorf("no session prefix for rig %q", a.Rig)
+	}
+	if c.capturePane == nil {
+		return "", errors.New("pane capture not configured")
+	}
+	return c.capturePane(name)
 }
 
 // Snapshot discovers active agent sessions under the town and derives stats.

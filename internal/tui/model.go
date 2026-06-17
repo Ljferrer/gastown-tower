@@ -18,6 +18,14 @@ type snapMsg struct {
 	err  error
 }
 
+// paneMsg carries the result of an async tmux pane capture for the selected
+// agent. err non-nil (no live session, capture failure) makes the preview fall
+// back to its dim placeholder.
+type paneMsg struct {
+	text string
+	err  error
+}
+
 // panel identifies one of the stacked panels in the cockpit. The focused panel
 // receives j/k scroll and enter; tab cycles focus across all of them.
 type panel int
@@ -31,26 +39,28 @@ const (
 
 // Model is the Bubble Tea model for the live Tower.
 type Model struct {
-	c             *tower.Collector
-	snap          tower.Snapshot
-	agents        []tower.Agent // flattened (and search-filtered) display order
-	cursor        int           // selected agent within the AGENTS panel
-	expanded      map[string]bool
-	focus         panel  // which panel receives scroll/enter
-	query         string // active search filter ("" = no filter)
-	searching     bool   // true while the user is typing a search query
-	showAllEvents bool   // false = curated flow; 't' toggles faithful (show-all)
-	convoyScroll  int
-	eventScroll   int
-	width         int
-	height        int
-	err           error
-	interval      time.Duration
+	c              *tower.Collector
+	snap           tower.Snapshot
+	agents         []tower.Agent // flattened (and search-filtered) display order
+	cursor         int           // selected agent within the AGENTS panel
+	expanded       map[string]bool
+	focus          panel  // which panel receives scroll/enter
+	query          string // active search filter ("" = no filter)
+	searching      bool   // true while the user is typing a search query
+	showAllEvents  bool   // false = curated flow; 't' toggles faithful (show-all)
+	convoyScroll   int
+	eventScroll    int
+	previewText    string // last captured tmux pane text for the selected agent
+	previewVisible bool   // 'p' toggles the live-preview region (default on)
+	width          int
+	height         int
+	err            error
+	interval       time.Duration
 }
 
 // New builds a Model that refreshes from the given collector.
 func New(c *tower.Collector) Model {
-	return Model{c: c, expanded: map[string]bool{}, interval: 1500 * time.Millisecond}
+	return Model{c: c, expanded: map[string]bool{}, previewVisible: true, interval: 1500 * time.Millisecond}
 }
 
 func (m Model) Init() tea.Cmd { return tea.Batch(m.refresh(), m.tickCmd()) }
@@ -66,6 +76,38 @@ func (m Model) refresh() tea.Cmd {
 	}
 }
 
+// selectedAgent returns the agent under the AGENTS cursor, or ok=false when the
+// (possibly filtered) list is empty.
+func (m Model) selectedAgent() (tower.Agent, bool) {
+	if m.cursor >= 0 && m.cursor < len(m.agents) {
+		return m.agents[m.cursor], true
+	}
+	return tower.Agent{}, false
+}
+
+// capturePaneCmd captures the given agent's live tmux pane off the UI thread and
+// reports it back as a paneMsg. The blocking tmux exec happens inside the
+// returned tea.Cmd (a goroutine), never in Update/View.
+func (m Model) capturePaneCmd(a tower.Agent) tea.Cmd {
+	return func() tea.Msg {
+		text, err := m.c.CapturePane(a)
+		return paneMsg{text: text, err: err}
+	}
+}
+
+// previewCmd captures the currently-selected agent's pane, or nil when there is
+// nothing selected (empty list) or the preview region is hidden. Always follows
+// the AGENTS cursor, regardless of which panel currently has focus.
+func (m Model) previewCmd() tea.Cmd {
+	if !m.previewVisible {
+		return nil
+	}
+	if a, ok := m.selectedAgent(); ok {
+		return m.capturePaneCmd(a)
+	}
+	return nil
+}
+
 func agentKey(a tower.Agent) string { return a.Group + "/" + a.Name }
 
 // Update implements tea.Model.
@@ -74,11 +116,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case tickMsg:
-		return m, tea.Batch(m.refresh(), m.tickCmd())
+		// Re-capture the selected agent's pane every tick so the preview keeps
+		// churning live (spinner and all) even when the cursor isn't moving.
+		return m, tea.Batch(m.refresh(), m.tickCmd(), m.previewCmd())
+	case paneMsg:
+		// On capture error (no live session, tmux missing) blank the text so the
+		// region renders its dim placeholder rather than stale output.
+		if msg.err != nil {
+			m.previewText = ""
+		} else {
+			m.previewText = msg.text
+		}
 	case snapMsg:
 		m.snap, m.err = msg.snap, msg.err
 		m.flatten()
 		m.clampCursor()
+		// Refresh the preview as soon as agents (re)load: the cursor may now point
+		// at a different agent, and this populates the region before the first tick.
+		return m, m.previewCmd()
 	case tea.MouseMsg:
 		// A left-button press on an agent's row focuses the AGENTS panel, moves
 		// the cursor there, and toggles that agent's expanded detail — the same
@@ -90,6 +145,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor = i
 				k := agentKey(m.agents[i])
 				m.expanded[k] = !m.expanded[k]
+				return m, m.previewCmd() // cursor moved — refresh the preview
 			}
 		}
 	case tea.KeyMsg:
@@ -111,8 +167,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.eventScroll = 0
 		case "up", "k":
 			m.scroll(-1)
+			return m, m.previewCmd() // cursor may have moved — refresh preview
 		case "down", "j":
 			m.scroll(+1)
+			return m, m.previewCmd() // cursor may have moved — refresh preview
+		case "p":
+			// Toggle the live-preview region. Re-show fires an immediate
+			// capture so it isn't blank until the next tick.
+			m.previewVisible = !m.previewVisible
+			return m, m.previewCmd()
 		case "enter", " ":
 			if m.focus == panelAgents && m.cursor < len(m.agents) {
 				k := agentKey(m.agents[m.cursor])
@@ -254,10 +317,11 @@ func (m Model) View() string {
 	var b strings.Builder
 	b.WriteString(m.renderHeader())
 	b.WriteString(m.renderAgentsPanel())
+	b.WriteString(m.renderPreviewPanel())
 	b.WriteString(m.renderConvoysPanel())
 	b.WriteString(m.renderEventsPanel())
 
-	b.WriteString("\n" + helpStyle.Render("tab focus · j/k scroll · enter/click expand · / search · t all-events · q quit") + "\n")
+	b.WriteString("\n" + helpStyle.Render("tab focus · j/k scroll · enter/click expand · / search · t all-events · p preview · q quit") + "\n")
 	return b.String()
 }
 
@@ -387,6 +451,82 @@ func (m Model) agentAtY(y int) int {
 		}
 	}
 	return -1
+}
+
+// previewHeight is the number of pane-text rows the preview region reserves:
+// proportional (~30%) to the terminal height and fixed regardless of how much
+// pane content exists, so the region never grows/shrinks as the operator arrows
+// between agents (the "stable, no layout jump" requirement). Floors keep it
+// usable on tiny terminals and before the first WindowSizeMsg arrives.
+func (m Model) previewHeight() int {
+	if m.height <= 0 {
+		return 8 // no size yet; a sane default until WindowSizeMsg lands
+	}
+	h := m.height * 3 / 10
+	if h < 3 {
+		h = 3
+	}
+	return h
+}
+
+// renderPreviewPanel renders the live tmux pane preview for the selected agent,
+// between the AGENTS and CONVOYS panels. Hidden entirely when previewVisible is
+// off ('p'). The body is a fixed previewHeight() rows — the tail (bottom lines)
+// of the captured pane, spinner line included — padded with blanks to keep the
+// layout height stable. A dim placeholder shows when there is no pane text.
+func (m Model) renderPreviewPanel() string {
+	if !m.previewVisible {
+		return ""
+	}
+	sub := ""
+	if a, ok := m.selectedAgent(); ok {
+		if sub = shortAddr(a.Addr); sub == "" {
+			sub = a.Name
+		}
+	}
+	var b strings.Builder
+	b.WriteString(panelHeader("PREVIEW", sub, false))
+	for _, ln := range m.previewBody(m.previewHeight()) {
+		b.WriteString(ln + "\n")
+	}
+	return b.String()
+}
+
+// previewBody returns exactly n rendered rows for the preview region: the bottom
+// n lines (tail) of the captured pane text, each clipped to the terminal width
+// so a long line never wraps and breaks the fixed height. When there is no pane
+// text it returns the dim placeholder; the result is always padded with blank
+// lines to n rows so the region's height stays constant.
+func (m Model) previewBody(n int) []string {
+	out := make([]string, 0, n)
+	text := strings.TrimRight(m.previewText, "\n")
+	if strings.TrimSpace(text) == "" {
+		out = append(out, "  "+dimStyle.Render("— no live tmux session —"))
+	} else {
+		lines := strings.Split(text, "\n")
+		if len(lines) > n {
+			lines = lines[len(lines)-n:] // tail: keep the bottom (spinner included)
+		}
+		for _, ln := range lines {
+			out = append(out, "  "+clip(ln, m.width-2))
+		}
+	}
+	for len(out) < n {
+		out = append(out, "")
+	}
+	return out
+}
+
+// clip truncates s to at most w runes (no ellipsis — preview rows are raw pane
+// text). A non-positive width disables clipping (no size known yet).
+func clip(s string, w int) string {
+	if w <= 0 {
+		return s
+	}
+	if r := []rune(s); len(r) > w {
+		return string(r[:w])
+	}
+	return s
 }
 
 func (m Model) renderConvoysPanel() string {

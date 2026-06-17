@@ -676,3 +676,122 @@ var errTest = errString("collector unavailable")
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+// The preview region renders by default (previewVisible), showing its dim
+// placeholder when no pane text has been captured, and sits between the AGENTS
+// and CONVOYS panels.
+func TestPreviewPanelDefaultPlaceholder(t *testing.T) {
+	m := newWithSnap()
+	if !m.previewVisible {
+		t.Fatal("preview should be visible by default")
+	}
+	out := m.View()
+	if !strings.Contains(out, "PREVIEW") {
+		t.Errorf("View() missing PREVIEW header:\n%s", out)
+	}
+	if !strings.Contains(out, "— no live tmux session —") {
+		t.Errorf("empty preview should show placeholder:\n%s", out)
+	}
+	// Ordering: PREVIEW between AGENTS and CONVOYS.
+	a, p, c := lineOf(out, "AGENTS"), lineOf(out, "PREVIEW"), lineOf(out, "CONVOYS")
+	if !(a < p && p < c) {
+		t.Errorf("panel order wrong: AGENTS=%d PREVIEW=%d CONVOYS=%d", a, p, c)
+	}
+}
+
+// 'p' toggles the whole preview region off and on.
+func TestPreviewToggle(t *testing.T) {
+	m := newWithSnap()
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	m = next.(Model)
+	if m.previewVisible {
+		t.Fatal("'p' did not hide the preview")
+	}
+	if strings.Contains(m.View(), "PREVIEW") {
+		t.Errorf("hidden preview should not render its header:\n%s", m.View())
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	m = next.(Model)
+	if !m.previewVisible || !strings.Contains(m.View(), "PREVIEW") {
+		t.Errorf("'p' did not re-show the preview")
+	}
+}
+
+// A paneMsg with text populates the preview; the tail (bottom lines, spinner
+// included) renders and the placeholder is gone. An error blanks it back to the
+// placeholder.
+func TestPreviewPaneMsg(t *testing.T) {
+	m := newWithSnap()
+	m.width, m.height = 80, 30
+	text := "old top line\nmiddle line\n✳ Honking… (3s · ↓ 12 tokens)"
+	next, _ := m.Update(paneMsg{text: text})
+	m = next.(Model)
+	out := m.View()
+	if !strings.Contains(out, "✳ Honking…") {
+		t.Errorf("preview should show captured spinner line:\n%s", out)
+	}
+	if strings.Contains(out, "— no live tmux session —") {
+		t.Errorf("preview with text must not show placeholder:\n%s", out)
+	}
+	// An error reverts to the placeholder.
+	next, _ = m.Update(paneMsg{err: errTest})
+	m = next.(Model)
+	if !strings.Contains(m.View(), "— no live tmux session —") {
+		t.Errorf("errored capture should fall back to placeholder:\n%s", m.View())
+	}
+}
+
+// previewBody returns exactly n rows regardless of content, keeping the region's
+// height stable so the layout never jumps between agents. It shows the tail when
+// content exceeds n.
+func TestPreviewBodyStableHeight(t *testing.T) {
+	m := newWithSnap()
+	m.width = 80
+	// Empty: still n rows (placeholder + blanks).
+	if got := m.previewBody(5); len(got) != 5 {
+		t.Errorf("empty previewBody returned %d rows, want 5", len(got))
+	}
+	// More content than n: exactly n rows, and the tail (last lines) is kept.
+	m.previewText = "l1\nl2\nl3\nl4\nl5\nl6\nl7"
+	got := m.previewBody(3)
+	if len(got) != 3 {
+		t.Fatalf("previewBody returned %d rows, want 3", len(got))
+	}
+	if !strings.Contains(got[2], "l7") {
+		t.Errorf("tail not kept: last row %q, want to contain l7", got[2])
+	}
+	if strings.Contains(strings.Join(got, "\n"), "l1") {
+		t.Errorf("top lines should be dropped when tailing: %v", got)
+	}
+}
+
+// Cursor movement (j/k) issues a preview-refresh command so the region follows
+// the selection. The command is non-nil whenever the preview is visible and an
+// agent is selected.
+func TestPreviewRefreshOnCursorMove(t *testing.T) {
+	m := newWithSnap()
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	if cmd == nil {
+		t.Error("j should issue a preview-refresh command")
+	}
+	// When the preview is hidden, no refresh command is issued.
+	m.previewVisible = false
+	if c := m.previewCmd(); c != nil {
+		t.Error("hidden preview should not issue a refresh command")
+	}
+}
+
+// clip truncates over-wide lines (no ellipsis) and leaves short lines and the
+// no-width case untouched, so a long pane line can never wrap and break the
+// fixed preview height.
+func TestClip(t *testing.T) {
+	if got := clip("hello world", 5); got != "hello" {
+		t.Errorf("clip width 5 = %q, want %q", got, "hello")
+	}
+	if got := clip("short", 80); got != "short" {
+		t.Errorf("clip under width changed string: %q", got)
+	}
+	if got := clip("anything", 0); got != "anything" {
+		t.Errorf("clip with no width should be a no-op: %q", got)
+	}
+}

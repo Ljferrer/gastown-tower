@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -716,5 +717,59 @@ func TestFetchEnrichmentBestEffort(t *testing.T) {
 	}
 	if c.enrichAt.IsZero() {
 		t.Error("cache timestamp should advance to avoid hammering failing commands")
+	}
+}
+
+// CapturePane resolves the agent's session via the cached prefix map and the
+// same socket-bound capture func that churn detection uses, returning the pane
+// text. A pre-warmed enrichment cache stands in for routes.jsonl so the lookup
+// hits no loaders.
+func TestCapturePane(t *testing.T) {
+	clock := time.Unix(1_700_000_000, 0)
+	var asked string
+	c := &Collector{
+		EnrichTTL: time.Minute,
+		now:       func() time.Time { return clock },
+		capturePane: func(session string) (string, error) {
+			asked = session
+			return "line1\nline2\n✳ Honking…", nil
+		},
+	}
+	// Warm the cache so fetchEnrichment returns it without invoking loaders.
+	c.enrich = enrichment{prefixes: map[string]string{"GigaClip": "gc"}}
+	c.enrichAt = clock
+
+	a := Agent{AgentRef: AgentRef{Name: "furiosa", Role: "polecat", Rig: "GigaClip", Group: "GigaClip"}}
+	text, err := c.CapturePane(a)
+	if err != nil {
+		t.Fatalf("CapturePane error: %v", err)
+	}
+	if asked != "gc-furiosa" {
+		t.Errorf("captured wrong session %q, want gc-furiosa", asked)
+	}
+	if !strings.Contains(text, "✳ Honking…") {
+		t.Errorf("pane text not returned: %q", text)
+	}
+}
+
+// CapturePane errors (so the caller shows a placeholder) when the agent's rig
+// has no known session prefix — the session name can't be resolved.
+func TestCapturePaneUnknownRig(t *testing.T) {
+	clock := time.Unix(1_700_000_000, 0)
+	called := false
+	c := &Collector{
+		EnrichTTL:   time.Minute,
+		now:         func() time.Time { return clock },
+		capturePane: func(string) (string, error) { called = true; return "x", nil },
+	}
+	c.enrich = enrichment{prefixes: map[string]string{}} // no prefix for any rig
+	c.enrichAt = clock
+
+	a := Agent{AgentRef: AgentRef{Name: "ghost", Role: "polecat", Rig: "Unknown", Group: "Unknown"}}
+	if _, err := c.CapturePane(a); err == nil {
+		t.Fatal("expected error for unresolvable rig, got nil")
+	}
+	if called {
+		t.Error("capturePane should not be invoked when the session name does not resolve")
 	}
 }
