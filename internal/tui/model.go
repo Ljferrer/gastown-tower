@@ -9,6 +9,7 @@ import (
 	"github.com/Ljferrer/gastown-tower/pkg/tower"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type tickMsg time.Time
@@ -612,23 +613,35 @@ func (m Model) previewTopBorder(sub string, inner int) string {
 }
 
 // previewBody returns exactly n rendered rows for the preview region: the bottom
-// n lines (tail) of the captured pane text, each clipped to fit the inner box
-// width w (the 2-space indent included) so a long line never wraps and breaks the
-// fixed height. When there is no pane text it returns the dim placeholder; the
-// result is always padded with blank lines to n rows so the region's height stays
-// constant.
+// n visual lines (tail) of the captured pane text, soft-wrapped to fit the inner
+// box width w (the 2-space indent included) so long lines wrap instead of
+// truncating. Wrapping is ANSI-aware (ansi.Hardwrap preserves escape codes and
+// wide-character widths), so a captured pane's colors never get split mid-escape.
+// The tail is taken after wrapping, so the newest line (spinner included) stays
+// visible at the bottom even when earlier lines wrapped into several rows. When
+// there is no pane text it returns the dim placeholder; the result is always
+// padded with blank lines to n rows so the region's height stays constant.
 func (m Model) previewBody(n, w int) []string {
 	out := make([]string, 0, n)
 	text := strings.TrimRight(m.previewText, "\n")
 	if strings.TrimSpace(text) == "" {
 		out = append(out, "  "+dimStyle.Render(clip("— no live tmux session —", w-2)))
 	} else {
-		lines := strings.Split(text, "\n")
+		cw := w - 2 // content width inside the 2-space indent
+		var lines []string
+		for _, ln := range strings.Split(text, "\n") {
+			if cw < 1 {
+				lines = append(lines, clip(ln, cw)) // too narrow to wrap; clip
+				continue
+			}
+			// Hardwrap may turn one captured line into several visual rows.
+			lines = append(lines, strings.Split(ansi.Hardwrap(ln, cw, false), "\n")...)
+		}
 		if len(lines) > n {
 			lines = lines[len(lines)-n:] // tail: keep the bottom (spinner included)
 		}
 		for _, ln := range lines {
-			out = append(out, "  "+clip(ln, w-2))
+			out = append(out, "  "+ln)
 		}
 	}
 	for len(out) < n {

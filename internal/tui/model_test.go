@@ -766,6 +766,61 @@ func TestPreviewBodyStableHeight(t *testing.T) {
 	}
 }
 
+// Long pane lines soft-wrap to the inner width instead of truncating (gtt-4tm):
+// one over-wide captured line becomes several visual rows, each no wider than the
+// content width, and the newest content stays anchored at the bottom (the tail is
+// taken after wrapping, so wrapped earlier lines never push the last line off).
+func TestPreviewBodyWrapsLongLines(t *testing.T) {
+	m := newWithSnap()
+	m.width = 80
+	// One 100-char line, content width 20 (w=22 minus the 2-space indent): wraps
+	// into 5 rows of 20, none truncated.
+	m.previewText = strings.Repeat("a", 100)
+	got := m.previewBody(10, 22)
+	full := 0
+	for _, ln := range got {
+		if w := lipgloss.Width(ln); w > 22 {
+			t.Errorf("wrapped row exceeds inner width: %d > 22: %q", w, ln)
+		}
+		if strings.Count(ln, "a") == 20 {
+			full++
+		}
+	}
+	if full != 5 {
+		t.Errorf("100 chars at width 20 should wrap to 5 full rows, got %d: %v", full, got)
+	}
+
+	// Tail after wrapping: a long first line plus a short newest line. The newest
+	// line must remain the bottom row even though the first line wrapped.
+	m.previewText = strings.Repeat("x", 60) + "\nNEWEST"
+	got = m.previewBody(3, 22)
+	if len(got) != 3 {
+		t.Fatalf("previewBody returned %d rows, want 3", len(got))
+	}
+	if !strings.Contains(got[2], "NEWEST") {
+		t.Errorf("newest line not at bottom after wrapping: %q", got[2])
+	}
+}
+
+// Wrapping is ANSI-aware (gtt-4tm): an over-wide colored line wraps without
+// splitting the escape sequence, so the SGR code survives intact and each visual
+// row still measures within the inner width.
+func TestPreviewBodyWrapPreservesANSI(t *testing.T) {
+	m := newWithSnap()
+	m.width = 80
+	m.previewText = "\x1b[31m" + strings.Repeat("z", 40) + "\x1b[0m"
+	got := m.previewBody(10, 22)
+	joined := strings.Join(got, "\n")
+	if !strings.Contains(joined, "\x1b[31m") {
+		t.Errorf("SGR color escape was split or lost by wrapping: %q", joined)
+	}
+	for _, ln := range got {
+		if w := lipgloss.Width(ln); w > 22 {
+			t.Errorf("ANSI row exceeds inner width: %d > 22: %q", w, ln)
+		}
+	}
+}
+
 // On a sized terminal the preview is framed in a lipgloss border (gtt-qnd): a
 // titled top rule, vertical rules whose right edge aligns regardless of pane
 // content (incl. wide runes), and a bottom rule. The border chrome is charged
