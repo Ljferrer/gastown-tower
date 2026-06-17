@@ -773,3 +773,54 @@ func TestCapturePaneUnknownRig(t *testing.T) {
 		t.Error("capturePane should not be invoked when the session name does not resolve")
 	}
 }
+
+// SendKeys resolves the agent's session via the cached prefix map (the same
+// resolution CapturePane uses) and forwards the text to the socket-bound send
+// func with the resolved session name.
+func TestSendKeys(t *testing.T) {
+	clock := time.Unix(1_700_000_000, 0)
+	var gotSession, gotText string
+	c := &Collector{
+		EnrichTTL: time.Minute,
+		now:       func() time.Time { return clock },
+		sendKeys: func(session, text string) error {
+			gotSession, gotText = session, text
+			return nil
+		},
+	}
+	c.enrich = enrichment{prefixes: map[string]string{"GigaClip": "gc"}}
+	c.enrichAt = clock
+
+	a := Agent{AgentRef: AgentRef{Name: "furiosa", Role: "polecat", Rig: "GigaClip", Group: "GigaClip"}}
+	if err := c.SendKeys(a, "hello agent"); err != nil {
+		t.Fatalf("SendKeys error: %v", err)
+	}
+	if gotSession != "gc-furiosa" {
+		t.Errorf("sent to wrong session %q, want gc-furiosa", gotSession)
+	}
+	if gotText != "hello agent" {
+		t.Errorf("sent wrong text %q, want %q", gotText, "hello agent")
+	}
+}
+
+// SendKeys errors (so the caller shows a no-session state) when the agent's rig
+// has no known session prefix, and never invokes the send func.
+func TestSendKeysUnknownRig(t *testing.T) {
+	clock := time.Unix(1_700_000_000, 0)
+	called := false
+	c := &Collector{
+		EnrichTTL: time.Minute,
+		now:       func() time.Time { return clock },
+		sendKeys:  func(string, string) error { called = true; return nil },
+	}
+	c.enrich = enrichment{prefixes: map[string]string{}} // no prefix for any rig
+	c.enrichAt = clock
+
+	a := Agent{AgentRef: AgentRef{Name: "ghost", Role: "polecat", Rig: "Unknown", Group: "Unknown"}}
+	if err := c.SendKeys(a, "x"); err == nil {
+		t.Fatal("expected error for unresolvable rig, got nil")
+	}
+	if called {
+		t.Error("sendKeys should not be invoked when the session name does not resolve")
+	}
+}

@@ -224,3 +224,18 @@ func capturePane(socket, session string) (string, error) {
 	}
 	return string(out), nil
 }
+
+// sendKeys types text into a tmux session's active pane on the given gt socket,
+// then a separate Enter to submit it (line-buffered: the whole line lands at
+// once). The text goes with -l (literal) so its content is never interpreted as
+// tmux key names — a message of "Enter" or "C-c" is typed, not executed — and
+// -- ends flag parsing so leading dashes are safe. The trailing Enter is a
+// second invocation because -l disables key-name lookup. Either exec failing
+// (no live session, tmux missing) surfaces as an error the caller turns into a
+// clear "no live session" state.
+func sendKeys(socket, session, text string) error {
+	if err := exec.Command("tmux", tmuxArgs(socket, "send-keys", "-t", session, "-l", "--", text)...).Run(); err != nil {
+		return err
+	}
+	return exec.Command("tmux", tmuxArgs(socket, "send-keys", "-t", session, "Enter")...).Run()
+}

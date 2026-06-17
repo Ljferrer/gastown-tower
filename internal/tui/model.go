@@ -27,6 +27,11 @@ type paneMsg struct {
 	err  error
 }
 
+// sentMsg carries the result of an async SendKeys to the selected agent's tmux
+// session (input mode). A non-nil err surfaces as a status line in the preview;
+// a nil err means the line reached the session.
+type sentMsg struct{ err error }
+
 // panel identifies one of the stacked panels in the cockpit. The focused panel
 // receives j/k scroll and enter; tab cycles focus across all of them.
 type panel int
@@ -54,6 +59,10 @@ type Model struct {
 	previewText    string // last captured tmux pane text for the selected agent
 	previewVisible bool   // 'p' toggles the live-preview region (default on)
 	previewOffset  int    // '+'/'-' delta on top of the proportional preview height (clamped)
+	paneLive       bool   // last capture succeeded with content — gates input mode
+	inputMode      bool   // 'i' enters: keys type into the selected agent, not the UI
+	inputBuf       string // accumulating line, sent to the agent on Enter
+	inputErr       string // last send/guard failure, shown as a preview status line
 	width          int
 	height         int
 	err            error
@@ -127,12 +136,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.refresh(), m.tickCmd(), m.previewCmd())
 	case paneMsg:
 		// On capture error (no live session, tmux missing) blank the text so the
-		// region renders its dim placeholder rather than stale output.
+		// region renders its dim placeholder rather than stale output. paneLive
+		// tracks whether the selected agent has a live, non-empty pane — the guard
+		// that gates entering input mode (you can only type to a live session).
 		if msg.err != nil {
-			m.previewText = ""
+			m.previewText, m.paneLive = "", false
 		} else {
 			m.previewText = msg.text
+			m.paneLive = strings.TrimSpace(msg.text) != ""
+			if m.paneLive {
+				m.inputErr = "" // a live pane clears a stale no-session warning
+			}
 		}
+	case sentMsg:
+		// Surface a send failure; on success keep the prior (cleared) status. Re-
+		// capture immediately so the agent's response starts streaming back without
+		// waiting for the next tick — the whole point of input mode.
+		if msg.err != nil {
+			m.inputErr = msg.err.Error()
+		}
+		return m, m.previewCmd()
 	case snapMsg:
 		m.snap, m.err = msg.snap, msg.err
 		m.flatten()
@@ -157,6 +180,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if m.searching {
 			return m.updateSearch(msg)
+		}
+		if m.inputMode {
+			// In input mode every key is literal input routed to the agent; none of
+			// the global keys below (p, +/-, tab, j/k, q) fire. esc/ctrl+c exit.
+			return m.updateInput(msg)
 		}
 		switch msg.String() {
 		case "q", "ctrl+c":
@@ -192,6 +220,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Shrink the preview region one row, floored at the min height.
 			m.previewOffset = m.clampOffset(m.previewOffset - 1)
 			return m, m.previewCmd()
+		case "i":
+			// Enter input mode to type into the selected agent's session. Requires a
+			// visible preview with a live capture so the user sees the response
+			// stream back; otherwise show a clear no-session state and stay put.
+			if _, ok := m.selectedAgent(); ok && m.previewVisible && m.paneLive {
+				m.inputMode, m.inputBuf, m.inputErr = true, "", ""
+			} else {
+				m.inputErr = "no live session to type to"
+			}
 		case "enter", " ":
 			if m.focus == panelAgents && m.cursor < len(m.agents) {
 				k := agentKey(m.agents[m.cursor])
@@ -226,6 +263,49 @@ func (m Model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.clampCursor()
 	}
 	return m, nil
+}
+
+// updateInput handles key input while input mode is active. Typed characters
+// accumulate in inputBuf; Enter sends the line (line-buffered) to the selected
+// agent's tmux session and stays in input mode so the user can keep typing while
+// the response streams back; esc and ctrl+c exit input mode. In v1 esc/ctrl+c
+// are reserved for exit — they are NOT forwarded to the agent (documented in the
+// help line). Empty lines are not sent.
+func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc, tea.KeyCtrlC:
+		m.inputMode = false
+		m.inputBuf = ""
+	case tea.KeyEnter:
+		text := m.inputBuf
+		m.inputBuf = ""
+		if strings.TrimSpace(text) == "" {
+			return m, nil // nothing to send
+		}
+		a, ok := m.selectedAgent()
+		if !ok {
+			m.inputMode = false
+			return m, nil
+		}
+		m.inputErr = ""
+		return m, m.sendKeysCmd(a, text)
+	case tea.KeyBackspace, tea.KeyDelete:
+		if r := []rune(m.inputBuf); len(r) > 0 {
+			m.inputBuf = string(r[:len(r)-1])
+		}
+	case tea.KeyRunes, tea.KeySpace:
+		m.inputBuf += string(msg.Runes)
+	}
+	return m, nil
+}
+
+// sendKeysCmd sends text (plus Enter) to the agent's tmux session off the UI
+// thread, reporting the outcome as a sentMsg. The blocking tmux exec happens
+// inside the returned tea.Cmd (a goroutine), never in Update/View.
+func (m Model) sendKeysCmd(a tower.Agent, text string) tea.Cmd {
+	return func() tea.Msg {
+		return sentMsg{err: m.c.SendKeys(a, text)}
+	}
 }
 
 // scroll moves the selection/viewport of the focused panel by delta.
@@ -341,7 +421,12 @@ func (m Model) View() string {
 	b.WriteString(m.renderConvoysPanel())
 	b.WriteString(m.renderEventsPanel())
 
-	b.WriteString("\n" + helpStyle.Render("tab focus · j/k scroll · enter/click expand · / search · t all-events · p preview · +/- size · q quit") + "\n")
+	help := "tab focus · j/k scroll · enter/click expand · / search · t all-events · p preview · +/- size · i input · q quit"
+	if m.inputMode {
+		// esc/ctrl+c are reserved for exiting input mode (v1: not sent to the agent).
+		help = "INPUT MODE · type a message · enter send · esc/ctrl+c exit"
+	}
+	b.WriteString("\n" + helpStyle.Render(help) + "\n")
 	return b.String()
 }
 
@@ -564,17 +649,29 @@ func (m Model) renderPreviewPanel() string {
 			sub = a.Name
 		}
 	}
+	if m.inputMode {
+		// Mark the region as the active input target in its title.
+		if sub == "" {
+			sub = "input"
+		} else {
+			sub += " · input"
+		}
+	}
 
 	// inner is the width between the vertical rules. On a tiny or not-yet-sized
 	// terminal there is no room for chrome, so fall back to a bare (unframed)
 	// region rather than draw a broken box.
 	inner := m.width - 2
 	rows := m.previewBody(m.previewContentHeight(), inner)
+	// In input mode (or to show a send/guard error) add row(s) below the pane body
+	// for the input line and status — their natural home inside the border
+	// (gtt-qnd).
+	rows = append(rows, m.previewInputRows(inner)...)
 	if inner < len("PREVIEW")+4 {
 		// No room for a frame (tiny or not-yet-sized terminal): fall back to the
 		// plain stacked-panel header so the region stays labeled and ordered.
 		var bare strings.Builder
-		bare.WriteString(panelHeader("PREVIEW", sub, false))
+		bare.WriteString(panelHeader("PREVIEW", sub, m.inputMode))
 		for _, ln := range rows {
 			bare.WriteString(ln + "\n")
 		}
@@ -589,6 +686,25 @@ func (m Model) renderPreviewPanel() string {
 	}
 	b.WriteString(previewBorder.Render("╰"+strings.Repeat("─", inner)+"╯") + "\n")
 	return b.String()
+}
+
+// previewInputRows returns the optional row(s) rendered below the pane body
+// inside the preview border: a dim status row for the last send/guard error (when
+// present) and, while typing, the live input buffer with a prompt caret and a
+// cursor. Returns nil (no extra rows, region keeps its normal footprint) when not
+// typing and there is no error. Text is clipped before styling so a long line
+// never overruns the box or splits an ANSI escape.
+func (m Model) previewInputRows(inner int) []string {
+	var rows []string
+	if m.inputErr != "" {
+		rows = append(rows, "  "+dimStyle.Render(clip("⚠ "+m.inputErr, inner-2)))
+	}
+	if m.inputMode {
+		// "  ❯ " indent+prompt (4 cols) and the trailing cursor (1) bracket the buf.
+		buf := clip(m.inputBuf, inner-5)
+		rows = append(rows, "  "+selBar.Render("❯ "+buf)+selBar.Render("▏"))
+	}
+	return rows
 }
 
 // previewTopBorder builds the titled top rule: "╭─ PREVIEW addr ───╮", inner

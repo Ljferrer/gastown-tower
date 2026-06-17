@@ -94,6 +94,7 @@ type Collector struct {
 	// Best-effort — failures degrade churn detection to the mtime heuristic.
 	listSessions func() (map[string]struct{}, error)
 	capturePane  func(session string) (string, error)
+	sendKeys     func(session, text string) error
 
 	// overseer gates which agents can read as awaiting-overseer. The zero value
 	// is the role default (mayor + crew); NewCollector layers tower.toml on top,
@@ -135,6 +136,7 @@ func NewCollector(townRoot string) *Collector {
 		loadMergeQueue: loadMergeQueue,
 		listSessions:   func() (map[string]struct{}, error) { return listTmuxSessions(socket) },
 		capturePane:    func(session string) (string, error) { return capturePane(socket, session) },
+		sendKeys:       func(session, text string) error { return sendKeys(socket, session, text) },
 	}
 }
 
@@ -163,6 +165,26 @@ func (c *Collector) CapturePane(a Agent) (string, error) {
 		return "", errors.New("pane capture not configured")
 	}
 	return c.capturePane(name)
+}
+
+// SendKeys types text (plus a trailing Enter) into the given agent's live tmux
+// session — the write-side mirror of CapturePane. It resolves the session name
+// via the same cached rig->prefix map (from routes.jsonl) and socket-bound tmux
+// wiring that churn detection and CapturePane use, so the TUI never shells out
+// itself. It errors when the agent's rig has no known session prefix, when no
+// send func is wired, or when the underlying tmux send-keys fails (no live
+// session, tmux missing) — the caller surfaces a clear "no live session" state
+// on any error.
+func (c *Collector) SendKeys(a Agent, text string) error {
+	prefixes := c.fetchEnrichment(c.now()).prefixes
+	name, ok := tmuxSession(a.AgentRef, prefixes)
+	if !ok {
+		return fmt.Errorf("no session prefix for rig %q", a.Rig)
+	}
+	if c.sendKeys == nil {
+		return errors.New("key send not configured")
+	}
+	return c.sendKeys(name, text)
 }
 
 // Snapshot discovers active agent sessions under the town and derives stats.

@@ -982,3 +982,158 @@ func TestPreviewSizePersists(t *testing.T) {
 		t.Errorf("preview size %d after nav/tick, want %d", got, grown)
 	}
 }
+
+// liveModel returns a model whose selected agent has a live, non-empty pane —
+// the precondition for entering input mode ('i'). A paneMsg with text both
+// populates the preview and sets paneLive, mirroring a successful capture.
+func liveModel() Model {
+	m := newWithSnap()
+	m.width, m.height = 80, 30
+	next, _ := m.Update(paneMsg{text: "agent prompt\n> "})
+	return next.(Model)
+}
+
+// 'i' enters input mode only when the selected agent has a live pane; the global
+// keys are then routed to the buffer instead of firing their normal actions.
+func TestInputModeEnters(t *testing.T) {
+	m := liveModel()
+	if m.inputMode {
+		t.Fatal("should not start in input mode")
+	}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
+	m = next.(Model)
+	if !m.inputMode {
+		t.Fatal("'i' did not enter input mode on a live pane")
+	}
+	out := m.View()
+	if !strings.Contains(out, "INPUT MODE") {
+		t.Errorf("help line should announce input mode:\n%s", out)
+	}
+}
+
+// 'i' on an agent with no live pane refuses to enter input mode and shows a
+// clear no-session state instead — the guard rail against typing into nothing.
+func TestInputModeGuardNoSession(t *testing.T) {
+	m := newWithSnap()
+	m.width, m.height = 80, 30
+	// No paneMsg with text: paneLive is false (no live session).
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
+	m = next.(Model)
+	if m.inputMode {
+		t.Fatal("'i' must not enter input mode without a live pane")
+	}
+	if !strings.Contains(m.View(), "no live session") {
+		t.Errorf("expected a no-session state in the view:\n%s", m.View())
+	}
+}
+
+// Typed characters accumulate in the buffer and render in the preview's input
+// line, and global keys (p, j, +) are literal input — they don't fire their
+// normal actions while typing.
+func TestInputModeTypingIsLiteral(t *testing.T) {
+	m := liveModel()
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
+	m = next.(Model)
+
+	wantVisible := m.previewVisible
+	for _, r := range "phj +" {
+		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = next.(Model)
+	}
+	if m.inputBuf != "phj +" {
+		t.Errorf("buffer = %q, want %q", m.inputBuf, "phj +")
+	}
+	if m.previewVisible != wantVisible {
+		t.Error("'p' toggled the preview while in input mode — global key leaked")
+	}
+	if m.cursor != 0 {
+		t.Error("'j' moved the cursor while in input mode — global key leaked")
+	}
+	if !strings.Contains(m.View(), "phj +") {
+		t.Errorf("input line not rendered in preview:\n%s", m.View())
+	}
+}
+
+// Backspace deletes the last rune of the buffer.
+func TestInputModeBackspace(t *testing.T) {
+	m := liveModel()
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
+	m = next.(Model)
+	for _, r := range "ab" {
+		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = next.(Model)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	m = next.(Model)
+	if m.inputBuf != "a" {
+		t.Errorf("after backspace buffer = %q, want %q", m.inputBuf, "a")
+	}
+}
+
+// esc exits input mode and discards the buffer (esc is reserved for exit in v1,
+// not forwarded to the agent).
+func TestInputModeEscExits(t *testing.T) {
+	m := liveModel()
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
+	m = next.(Model)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	m = next.(Model)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if m.inputMode {
+		t.Fatal("esc did not exit input mode")
+	}
+	if m.inputBuf != "" {
+		t.Errorf("esc should discard the buffer, got %q", m.inputBuf)
+	}
+}
+
+// Enter on a non-empty buffer issues a send command and clears the buffer while
+// staying in input mode (so the user can keep typing as the response streams).
+// An empty buffer is a no-op (no command, no exit).
+func TestInputModeEnterSendsAndClears(t *testing.T) {
+	m := liveModel()
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
+	m = next.(Model)
+
+	// Empty Enter: no command, still in input mode, buffer stays empty.
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if cmd != nil {
+		t.Error("empty Enter should not issue a send command")
+	}
+	if !m.inputMode {
+		t.Error("empty Enter should not exit input mode")
+	}
+
+	for _, r := range "hi" {
+		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = next.(Model)
+	}
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if cmd == nil {
+		t.Error("Enter on a non-empty buffer should issue a send command")
+	}
+	if m.inputBuf != "" {
+		t.Errorf("Enter should clear the buffer, got %q", m.inputBuf)
+	}
+	if !m.inputMode {
+		t.Error("Enter should keep input mode active for continued typing")
+	}
+}
+
+// A send failure (sentMsg with err) surfaces as a status line in the preview.
+func TestInputModeSendErrorShown(t *testing.T) {
+	m := liveModel()
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
+	m = next.(Model)
+	next, _ = m.Update(sentMsg{err: errTest})
+	m = next.(Model)
+	if m.inputErr == "" {
+		t.Fatal("send error not recorded")
+	}
+	if !strings.Contains(m.View(), m.inputErr) {
+		t.Errorf("send error not shown in preview:\n%s", m.View())
+	}
+}
