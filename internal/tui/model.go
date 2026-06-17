@@ -325,6 +325,10 @@ var (
 	awaitStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#e8a33d")) // orange — awaiting overseer
 	selBar     = lipgloss.NewStyle().Foreground(lipgloss.Color(tower.TownColor)).Bold(true)
 	panelStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("250"))
+	// previewBorder colors the box-drawing chrome around the PREVIEW region. The
+	// dim 240 matches the help-line foreground so the frame reads as quiet panel
+	// chrome rather than competing with the live pane content inside it.
+	previewBorder = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 )
 
 // View implements tea.Model. It is pure (no TTY needed) so it is unit-testable.
@@ -525,11 +529,30 @@ func (m Model) previewHeight() int {
 	return h
 }
 
+// previewBorderRows is the vertical chrome cost of the PREVIEW box: the titled
+// top rule plus the bottom rule. It is charged against previewHeight() so the
+// bordered region's total footprint matches the proportional + resizable height
+// (gtt-0qj/gtt-60p) and never overflows the ~80% clamp into the panels below.
+const previewBorderRows = 2
+
+// previewContentHeight is the number of pane-text rows that fit inside the
+// border: the previewHeight() budget minus the two border rules, floored at one
+// so the placeholder/spinner line is always visible even at the minimum size.
+func (m Model) previewContentHeight() int {
+	if h := m.previewHeight() - previewBorderRows; h > 1 {
+		return h
+	}
+	return 1
+}
+
 // renderPreviewPanel renders the live tmux pane preview for the selected agent,
-// between the AGENTS and CONVOYS panels. Hidden entirely when previewVisible is
-// off ('p'). The body is a fixed previewHeight() rows — the tail (bottom lines)
-// of the captured pane, spinner line included — padded with blanks to keep the
-// layout height stable. A dim placeholder shows when there is no pane text.
+// between the AGENTS and CONVOYS panels, framed in a lipgloss border so it reads
+// as a distinct panel. The selected agent's address rides in the top border as a
+// title. Hidden entirely when previewVisible is off ('p'). The body is a fixed
+// previewContentHeight() rows — the tail (bottom lines) of the captured pane,
+// spinner line included — padded with blanks so the framed region's height stays
+// constant as the operator arrows between agents. A dim placeholder shows when
+// there is no pane text.
 func (m Model) renderPreviewPanel() string {
 	if !m.previewVisible {
 		return ""
@@ -540,37 +563,88 @@ func (m Model) renderPreviewPanel() string {
 			sub = a.Name
 		}
 	}
-	var b strings.Builder
-	b.WriteString(panelHeader("PREVIEW", sub, false))
-	for _, ln := range m.previewBody(m.previewHeight()) {
-		b.WriteString(ln + "\n")
+
+	// inner is the width between the vertical rules. On a tiny or not-yet-sized
+	// terminal there is no room for chrome, so fall back to a bare (unframed)
+	// region rather than draw a broken box.
+	inner := m.width - 2
+	rows := m.previewBody(m.previewContentHeight(), inner)
+	if inner < len("PREVIEW")+4 {
+		// No room for a frame (tiny or not-yet-sized terminal): fall back to the
+		// plain stacked-panel header so the region stays labeled and ordered.
+		var bare strings.Builder
+		bare.WriteString(panelHeader("PREVIEW", sub, false))
+		for _, ln := range rows {
+			bare.WriteString(ln + "\n")
+		}
+		return bare.String()
 	}
+
+	var b strings.Builder
+	b.WriteString("\n")
+	b.WriteString(m.previewTopBorder(sub, inner) + "\n")
+	for _, ln := range rows {
+		b.WriteString(previewBorder.Render("│") + padTo(ln, inner) + previewBorder.Render("│") + "\n")
+	}
+	b.WriteString(previewBorder.Render("╰"+strings.Repeat("─", inner)+"╯") + "\n")
 	return b.String()
 }
 
+// previewTopBorder builds the titled top rule: "╭─ PREVIEW addr ───╮", inner
+// runes wide between the corners. The "PREVIEW" label and address keep the panel
+// styling (panelStyle/dim) used by the other panel headers; the rest is dim
+// border chrome. The title is dropped (plain rule) if it cannot fit the width.
+func (m Model) previewTopBorder(sub string, inner int) string {
+	label := "PREVIEW"
+	titlePlain := label
+	styledTitle := panelStyle.Render(label)
+	if sub != "" {
+		titlePlain += " " + sub
+		styledTitle += " " + dimStyle.Render(sub)
+	}
+	// Rule layout inside the corners: "─ " + title + " " + fill ── = inner runes.
+	fill := inner - lipgloss.Width(titlePlain) - 3
+	if fill < 0 {
+		return previewBorder.Render("╭" + strings.Repeat("─", inner) + "╮")
+	}
+	return previewBorder.Render("╭─ ") + styledTitle +
+		previewBorder.Render(" "+strings.Repeat("─", fill)+"╮")
+}
+
 // previewBody returns exactly n rendered rows for the preview region: the bottom
-// n lines (tail) of the captured pane text, each clipped to the terminal width
-// so a long line never wraps and breaks the fixed height. When there is no pane
-// text it returns the dim placeholder; the result is always padded with blank
-// lines to n rows so the region's height stays constant.
-func (m Model) previewBody(n int) []string {
+// n lines (tail) of the captured pane text, each clipped to fit the inner box
+// width w (the 2-space indent included) so a long line never wraps and breaks the
+// fixed height. When there is no pane text it returns the dim placeholder; the
+// result is always padded with blank lines to n rows so the region's height stays
+// constant.
+func (m Model) previewBody(n, w int) []string {
 	out := make([]string, 0, n)
 	text := strings.TrimRight(m.previewText, "\n")
 	if strings.TrimSpace(text) == "" {
-		out = append(out, "  "+dimStyle.Render("— no live tmux session —"))
+		out = append(out, "  "+dimStyle.Render(clip("— no live tmux session —", w-2)))
 	} else {
 		lines := strings.Split(text, "\n")
 		if len(lines) > n {
 			lines = lines[len(lines)-n:] // tail: keep the bottom (spinner included)
 		}
 		for _, ln := range lines {
-			out = append(out, "  "+clip(ln, m.width-2))
+			out = append(out, "  "+clip(ln, w-2))
 		}
 	}
 	for len(out) < n {
 		out = append(out, "")
 	}
 	return out
+}
+
+// padTo right-pads s with spaces to a visible width of w, measuring with
+// lipgloss so styled (ANSI) rows align inside the border. Rows are pre-clipped to
+// w by previewBody, so s is never wider than w.
+func padTo(s string, w int) string {
+	if gap := w - lipgloss.Width(s); gap > 0 {
+		return s + strings.Repeat(" ", gap)
+	}
+	return s
 }
 
 // clip truncates s to at most w runes (no ellipsis — preview rows are raw pane

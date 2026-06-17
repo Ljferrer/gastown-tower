@@ -7,6 +7,7 @@ import (
 
 	"github.com/Ljferrer/gastown-tower/pkg/tower"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func fixtureSnapshot() tower.Snapshot {
@@ -748,12 +749,12 @@ func TestPreviewBodyStableHeight(t *testing.T) {
 	m := newWithSnap()
 	m.width = 80
 	// Empty: still n rows (placeholder + blanks).
-	if got := m.previewBody(5); len(got) != 5 {
+	if got := m.previewBody(5, 78); len(got) != 5 {
 		t.Errorf("empty previewBody returned %d rows, want 5", len(got))
 	}
 	// More content than n: exactly n rows, and the tail (last lines) is kept.
 	m.previewText = "l1\nl2\nl3\nl4\nl5\nl6\nl7"
-	got := m.previewBody(3)
+	got := m.previewBody(3, 78)
 	if len(got) != 3 {
 		t.Fatalf("previewBody returned %d rows, want 3", len(got))
 	}
@@ -762,6 +763,42 @@ func TestPreviewBodyStableHeight(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(got, "\n"), "l1") {
 		t.Errorf("top lines should be dropped when tailing: %v", got)
+	}
+}
+
+// On a sized terminal the preview is framed in a lipgloss border (gtt-qnd): a
+// titled top rule, vertical rules whose right edge aligns regardless of pane
+// content (incl. wide runes), and a bottom rule. The border chrome is charged
+// against previewHeight() so the framed region never grows past the budget.
+func TestPreviewBorderFramed(t *testing.T) {
+	m := newWithSnap()
+	m.width, m.height = 64, 30
+	m.previewText = "first line\n✳ Honking… (3s · ↓ 12 tokens)"
+	next, _ := m.Update(paneMsg{text: m.previewText})
+	m = next.(Model)
+
+	panel := m.renderPreviewPanel()
+	lines := strings.Split(strings.Trim(panel, "\n"), "\n")
+	top, bottom := lines[0], lines[len(lines)-1]
+	if !strings.HasPrefix(top, "╭") || !strings.HasSuffix(top, "╮") {
+		t.Errorf("top rule not a border: %q", top)
+	}
+	if !strings.Contains(top, "PREVIEW") {
+		t.Errorf("title missing from top rule: %q", top)
+	}
+	if !strings.HasPrefix(bottom, "╰") || !strings.HasSuffix(bottom, "╯") {
+		t.Errorf("bottom rule not a border: %q", bottom)
+	}
+	// Every rule and body row occupies exactly m.width columns: the right edge
+	// of the frame stays flush, so nothing overflows or clips.
+	for i, ln := range lines {
+		if w := lipgloss.Width(ln); w != m.width {
+			t.Errorf("line %d width %d, want %d: %q", i, w, m.width, ln)
+		}
+	}
+	// Framed footprint = previewHeight() rows total (content + 2 border rules).
+	if got := len(lines); got != m.previewHeight() {
+		t.Errorf("framed region is %d rows, want previewHeight()=%d", got, m.previewHeight())
 	}
 }
 
