@@ -108,6 +108,32 @@ func TestParseSpinner(t *testing.T) {
 	}
 }
 
+// capture-pane runs with -e (gtt-d0g), so the captured text carries ANSI escape
+// sequences — including ones inserted mid-line by tmux. The liveness predicates
+// strip escapes first, so a colored pane still matches the same visible markers.
+func TestPredicatesSurviveANSIEscapes(t *testing.T) {
+	// SGR codes wrap the marker and sit between "❯" and the option number and
+	// inside the spinner line — the worst case for a naive regex on raw text.
+	working := "\x1b[2m· \x1b[0mFlambéing… (\x1b[33m44s\x1b[0m · ↓ 2.0k tokens)\n" +
+		"  ⏵⏵ bypass permissions \x1b[1m·\x1b[0m \x1b[31mesc to interrupt\x1b[0m"
+	if !paneWorking(working) {
+		t.Error("working marker buried in SGR escapes should still read as churning")
+	}
+
+	selection := "Do you want to proceed?\n\x1b[7m❯\x1b[0m \x1b[1m1.\x1b[0m Yes\n  2. No"
+	if !paneAwaiting(selection) {
+		t.Error("numbered selection box with SGR escapes should still read as awaiting")
+	}
+
+	turn, ok := parseSpinner(working)
+	if !ok {
+		t.Fatal("spinner line with SGR escapes should still parse")
+	}
+	if turn.Elapsed != 44*time.Second || turn.Tokens != 2000 {
+		t.Errorf("spinner parse with escapes = %v/%d tokens, want 44s/2000", turn.Elapsed, turn.Tokens)
+	}
+}
+
 // Session names follow "<prefix>-<leaf>": town agents use "hq", rig agents use
 // the rig's route prefix, and a deacon dog uses its leaf name (deacon/boot -> boot).
 func TestTmuxSession(t *testing.T) {

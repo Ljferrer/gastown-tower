@@ -757,7 +757,11 @@ func (m Model) previewBody(n, w int) []string {
 			lines = lines[len(lines)-n:] // tail: keep the bottom (spinner included)
 		}
 		for _, ln := range lines {
-			out = append(out, "  "+ln)
+			// Reset SGR at the line's end so a dangling color from the captured pane
+			// (capture-pane -e keeps colors, gtt-d0g) can't bleed into the pad spaces
+			// padTo adds or the border/title chrome. lipgloss.Width ignores the reset,
+			// so alignment is unaffected.
+			out = append(out, "  "+ln+"\x1b[0m")
 		}
 	}
 	for len(out) < n {

@@ -821,6 +821,20 @@ func TestPreviewBodyWrapPreservesANSI(t *testing.T) {
 	}
 }
 
+// Each rendered pane content line ends with an SGR reset (gtt-d0g) so a dangling
+// color from the captured pane (capture-pane -e) can't bleed into padTo's pad
+// spaces or the surrounding border/title chrome.
+func TestPreviewBodyResetsColorBleed(t *testing.T) {
+	m := newWithSnap()
+	m.width = 80
+	// A line that opens a color and never resets it — the bleed hazard.
+	m.previewText = "\x1b[31mred line with no reset"
+	got := m.previewBody(3, 22)
+	if !strings.HasSuffix(got[0], "\x1b[0m") {
+		t.Errorf("pane content line should end with SGR reset, got %q", got[0])
+	}
+}
+
 // On a sized terminal the preview is framed in a lipgloss border (gtt-qnd): a
 // titled top rule, vertical rules whose right edge aligns regardless of pane
 // content (incl. wide runes), and a bottom rule. The border chrome is charged

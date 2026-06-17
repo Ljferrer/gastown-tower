@@ -13,7 +13,16 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/charmbracelet/x/ansi"
 )
+
+// paneStrip removes ANSI escape sequences from captured pane text. capture-pane
+// runs with -e so the display path keeps colors, but the liveness predicates
+// regex on visible substrings — an SGR code inserted mid-word (e.g. between "❯"
+// and the option number) would break a match. Stripping first keeps the
+// predicates matching the same plain text they did before -e was added.
+func paneStrip(pane string) string { return ansi.Strip(pane) }
 
 // workingMarker is Claude Code's interrupt hint, shown in a session's status
 // line ONLY while the agent is actively generating a turn. Its presence is the
@@ -24,7 +33,7 @@ const workingMarker = "esc to interrupt"
 // paneWorking reports whether captured pane content shows the agent actively
 // working (mid-turn). Pure over the captured text for straightforward testing.
 func paneWorking(pane string) bool {
-	return strings.Contains(pane, workingMarker)
+	return strings.Contains(paneStrip(pane), workingMarker)
 }
 
 // paneAwaitingRe matches Claude Code's selection-box prompt: the caret cursor on
@@ -40,7 +49,7 @@ func paneAwaiting(pane string) bool {
 	if paneWorking(pane) {
 		return false
 	}
-	return paneAwaitingRe.MatchString(pane)
+	return paneAwaitingRe.MatchString(paneStrip(pane))
 }
 
 // TurnProgress is the current-turn detail parsed from the spinner line: how long
@@ -61,7 +70,7 @@ var spinnerRe = regexp.MustCompile(`\((\d+)s · ↓ ([\d.]+)(k?) tokens`)
 // parseSpinner extracts current-turn elapsed + streamed tokens from pane content.
 // ok=false when no spinner line is present (agent idle, or the format changed).
 func parseSpinner(pane string) (TurnProgress, bool) {
-	m := spinnerRe.FindStringSubmatch(pane)
+	m := spinnerRe.FindStringSubmatch(paneStrip(pane))
 	if m == nil {
 		return TurnProgress{}, false
 	}
@@ -216,9 +225,12 @@ func listTmuxSessions(socket string) (map[string]struct{}, error) {
 }
 
 // capturePane returns the visible text of a tmux session's active pane on the
-// given gt socket.
+// given gt socket. The -e flag includes escape sequences (colors + text
+// attributes) so the preview renders the pane with the same colors/bold as a
+// real `tmux attach`. The liveness predicates that parse pane text strip these
+// escapes first (paneStrip) so an SGR code inserted mid-word can't break a match.
 func capturePane(socket, session string) (string, error) {
-	out, err := exec.Command("tmux", tmuxArgs(socket, "capture-pane", "-p", "-t", session)...).Output()
+	out, err := exec.Command("tmux", tmuxArgs(socket, "capture-pane", "-e", "-p", "-t", session)...).Output()
 	if err != nil {
 		return "", err
 	}
