@@ -60,8 +60,7 @@ type Model struct {
 	previewVisible bool   // 'p' toggles the live-preview region (default on)
 	previewOffset  int    // '+'/'-' delta on top of the proportional preview height (clamped)
 	paneLive       bool   // last capture succeeded with content — gates input mode
-	inputMode      bool   // 'i' enters: keys type into the selected agent, not the UI
-	inputBuf       string // accumulating line, sent to the agent on Enter
+	inputMode      bool   // 'i' enters: keys pass through to the selected agent's pane
 	inputErr       string // last send/guard failure, shown as a preview status line
 	width          int
 	height         int
@@ -150,8 +149,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case sentMsg:
 		// Surface a send failure; on success keep the prior (cleared) status. Re-
-		// capture immediately so the agent's response starts streaming back without
-		// waiting for the next tick — the whole point of input mode.
+		// capture immediately so the pane's reaction to the keystroke shows up
+		// without waiting for the next tick — the live-mirror feel of input mode.
 		if msg.err != nil {
 			m.inputErr = msg.err.Error()
 		}
@@ -182,8 +181,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateSearch(msg)
 		}
 		if m.inputMode {
-			// In input mode every key is literal input routed to the agent; none of
-			// the global keys below (p, +/-, tab, j/k, q) fire. esc/ctrl+c exit.
+			// In input mode every key passes through live to the agent's pane; none
+			// of the global keys below (p, +/-, tab, j/k, q) fire. Ctrl-Q exits —
+			// it is the ONE key not forwarded, so esc/ctrl+c reach the agent.
 			return m.updateInput(msg)
 		}
 		switch msg.String() {
@@ -221,11 +221,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.previewOffset = m.clampOffset(m.previewOffset - 1)
 			return m, m.previewCmd()
 		case "i":
-			// Enter input mode to type into the selected agent's session. Requires a
-			// visible preview with a live capture so the user sees the response
-			// stream back; otherwise show a clear no-session state and stay put.
+			// Enter input mode to drive the selected agent's session live. Requires a
+			// visible preview with a live capture so the user sees the pane react to
+			// each keystroke; otherwise show a clear no-session state and stay put.
 			if _, ok := m.selectedAgent(); ok && m.previewVisible && m.paneLive {
-				m.inputMode, m.inputBuf, m.inputErr = true, "", ""
+				m.inputMode, m.inputErr = true, ""
 			} else {
 				m.inputErr = "no live session to type to"
 			}
@@ -265,46 +265,58 @@ func (m Model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// updateInput handles key input while input mode is active. Typed characters
-// accumulate in inputBuf; Enter sends the line (line-buffered) to the selected
-// agent's tmux session and stays in input mode so the user can keep typing while
-// the response streams back; esc and ctrl+c exit input mode. In v1 esc/ctrl+c
-// are reserved for exit — they are NOT forwarded to the agent (documented in the
-// help line). Empty lines are not sent.
+// updateInput handles key input while input mode is active: the preview is a
+// live mirror, so every keystroke passes straight through to the selected
+// agent's tmux pane (arrows, Enter, Esc, Ctrl-C, Tab, Backspace, literal runes —
+// answer a selection box, interrupt a turn, type a message char-by-char). The
+// ONE exception is Ctrl-Q, the dedicated exit key: it leaves input mode and is
+// never forwarded, which is exactly why Esc and Ctrl-C are free to reach the
+// agent (DESIGN: a non-conflicting exit key was required once Esc/Ctrl-C became
+// pass-through; gtt-fwy). Each forwarded key triggers a sentMsg, whose handler
+// re-captures the pane immediately so the reaction shows within a tick.
 func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc, tea.KeyCtrlC:
+	if msg.Type == tea.KeyCtrlQ {
 		m.inputMode = false
-		m.inputBuf = ""
-	case tea.KeyEnter:
-		text := m.inputBuf
-		m.inputBuf = ""
-		if strings.TrimSpace(text) == "" {
-			return m, nil // nothing to send
-		}
-		a, ok := m.selectedAgent()
-		if !ok {
-			m.inputMode = false
-			return m, nil
-		}
-		m.inputErr = ""
-		return m, m.sendKeysCmd(a, text)
-	case tea.KeyBackspace, tea.KeyDelete:
-		if r := []rune(m.inputBuf); len(r) > 0 {
-			m.inputBuf = string(r[:len(r)-1])
-		}
-	case tea.KeyRunes, tea.KeySpace:
-		m.inputBuf += string(msg.Runes)
+		return m, nil
 	}
-	return m, nil
+	a, ok := m.selectedAgent()
+	if !ok {
+		m.inputMode = false
+		return m, nil
+	}
+	if !m.paneLive {
+		// The session died out from under us; leave input mode with a clear note
+		// rather than fire keys into nothing.
+		m.inputMode = false
+		m.inputErr = "no live session to type to"
+		return m, nil
+	}
+	m.inputErr = ""
+	return m, m.sendKeyCmd(a, keyFor(msg))
 }
 
-// sendKeysCmd sends text (plus Enter) to the agent's tmux session off the UI
+// keyFor translates a bubbletea KeyMsg into the neutral tower.Key the collector
+// forwards to tmux. Printable runes (and space) become literal Text typed
+// verbatim; every other key becomes a Name (KeyMsg.String(), e.g. "enter",
+// "up", "ctrl+c") that pkg/tower maps to tmux's key-name vocabulary — keeping
+// that mapping out of the TUI.
+func keyFor(msg tea.KeyMsg) tower.Key {
+	switch msg.Type {
+	case tea.KeyRunes:
+		return tower.Key{Text: string(msg.Runes)}
+	case tea.KeySpace:
+		return tower.Key{Text: " "}
+	default:
+		return tower.Key{Name: msg.String()}
+	}
+}
+
+// sendKeyCmd forwards a single keystroke to the agent's tmux pane off the UI
 // thread, reporting the outcome as a sentMsg. The blocking tmux exec happens
 // inside the returned tea.Cmd (a goroutine), never in Update/View.
-func (m Model) sendKeysCmd(a tower.Agent, text string) tea.Cmd {
+func (m Model) sendKeyCmd(a tower.Agent, k tower.Key) tea.Cmd {
 	return func() tea.Msg {
-		return sentMsg{err: m.c.SendKeys(a, text)}
+		return sentMsg{err: m.c.SendKey(a, k)}
 	}
 }
 
@@ -423,8 +435,9 @@ func (m Model) View() string {
 
 	help := "tab focus · j/k scroll · enter/click expand · / search · t all-events · p preview · +/- size · i input · q quit"
 	if m.inputMode {
-		// esc/ctrl+c are reserved for exiting input mode (v1: not sent to the agent).
-		help = "INPUT MODE · type a message · enter send · esc/ctrl+c exit"
+		// Ctrl-Q is the dedicated exit key; every other key (esc/ctrl+c included)
+		// passes through live to the agent's pane.
+		help = "INPUT MODE · keys go live to the agent · ctrl+q to exit"
 	}
 	b.WriteString("\n" + helpStyle.Render(help) + "\n")
 	return b.String()
@@ -689,22 +702,17 @@ func (m Model) renderPreviewPanel() string {
 }
 
 // previewInputRows returns the optional row(s) rendered below the pane body
-// inside the preview border: a dim status row for the last send/guard error (when
-// present) and, while typing, the live input buffer with a prompt caret and a
-// cursor. Returns nil (no extra rows, region keeps its normal footprint) when not
-// typing and there is no error. Text is clipped before styling so a long line
-// never overruns the box or splits an ANSI escape.
+// inside the preview border. Input mode is fully transparent — the pane mirror
+// IS the feedback (no separate input line; keystrokes go straight to the pane),
+// so the only extra row is a dim status line for the last send/guard error when
+// present. Returns nil (region keeps its normal footprint) when there is no
+// error. Text is clipped before styling so a long line never overruns the box or
+// splits an ANSI escape.
 func (m Model) previewInputRows(inner int) []string {
-	var rows []string
-	if m.inputErr != "" {
-		rows = append(rows, "  "+dimStyle.Render(clip("⚠ "+m.inputErr, inner-2)))
+	if m.inputErr == "" {
+		return nil
 	}
-	if m.inputMode {
-		// "  ❯ " indent+prompt (4 cols) and the trailing cursor (1) bracket the buf.
-		buf := clip(m.inputBuf, inner-5)
-		rows = append(rows, "  "+selBar.Render("❯ "+buf)+selBar.Render("▏"))
-	}
-	return rows
+	return []string{"  " + dimStyle.Render(clip("⚠ "+m.inputErr, inner-2))}
 }
 
 // previewTopBorder builds the titled top rule: "╭─ PREVIEW addr ───╮", inner

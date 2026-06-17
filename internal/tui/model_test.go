@@ -1007,8 +1007,8 @@ func liveModel() Model {
 	return next.(Model)
 }
 
-// 'i' enters input mode only when the selected agent has a live pane; the global
-// keys are then routed to the buffer instead of firing their normal actions.
+// 'i' enters input mode only when the selected agent has a live pane; keys are
+// then passed through to the agent instead of firing their normal actions.
 func TestInputModeEnters(t *testing.T) {
 	m := liveModel()
 	if m.inputMode {
@@ -1022,6 +1022,9 @@ func TestInputModeEnters(t *testing.T) {
 	out := m.View()
 	if !strings.Contains(out, "INPUT MODE") {
 		t.Errorf("help line should announce input mode:\n%s", out)
+	}
+	if !strings.Contains(out, "ctrl+q") {
+		t.Errorf("help line should document the ctrl+q exit key:\n%s", out)
 	}
 }
 
@@ -1041,21 +1044,25 @@ func TestInputModeGuardNoSession(t *testing.T) {
 	}
 }
 
-// Typed characters accumulate in the buffer and render in the preview's input
-// line, and global keys (p, j, +) are literal input — they don't fire their
-// normal actions while typing.
-func TestInputModeTypingIsLiteral(t *testing.T) {
+// In input mode every key passes through live to the agent (each issues a send
+// command) and the global keys (p, j) do NOT fire their normal actions — the
+// preview is a transparent mirror, not a UI with its own bindings.
+func TestInputModePassesKeysThrough(t *testing.T) {
 	m := liveModel()
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
 	m = next.(Model)
 
 	wantVisible := m.previewVisible
+	// 'p' would toggle the preview and 'j' would move the cursor outside input mode.
 	for _, r := range "phj +" {
-		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 		m = next.(Model)
-	}
-	if m.inputBuf != "phj +" {
-		t.Errorf("buffer = %q, want %q", m.inputBuf, "phj +")
+		if cmd == nil {
+			t.Errorf("typing %q did not issue a send command", string(r))
+		}
+		if !m.inputMode {
+			t.Errorf("typing %q exited input mode", string(r))
+		}
 	}
 	if m.previewVisible != wantVisible {
 		t.Error("'p' toggled the preview while in input mode — global key leaked")
@@ -1063,77 +1070,102 @@ func TestInputModeTypingIsLiteral(t *testing.T) {
 	if m.cursor != 0 {
 		t.Error("'j' moved the cursor while in input mode — global key leaked")
 	}
-	if !strings.Contains(m.View(), "phj +") {
-		t.Errorf("input line not rendered in preview:\n%s", m.View())
-	}
 }
 
-// Backspace deletes the last rune of the buffer.
-func TestInputModeBackspace(t *testing.T) {
+// Special keys (arrows, Enter, Backspace) pass through too, each issuing a send
+// command while staying in input mode — driving a selection box / editing a line.
+func TestInputModeSpecialKeysPassThrough(t *testing.T) {
 	m := liveModel()
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
 	m = next.(Model)
-	for _, r := range "ab" {
-		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	for _, kt := range []tea.KeyType{tea.KeyUp, tea.KeyDown, tea.KeyEnter, tea.KeyBackspace, tea.KeyTab} {
+		next, cmd := m.Update(tea.KeyMsg{Type: kt})
 		m = next.(Model)
-	}
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
-	m = next.(Model)
-	if m.inputBuf != "a" {
-		t.Errorf("after backspace buffer = %q, want %q", m.inputBuf, "a")
+		if cmd == nil {
+			t.Errorf("special key %v did not issue a send command", kt)
+		}
+		if !m.inputMode {
+			t.Errorf("special key %v exited input mode", kt)
+		}
 	}
 }
 
-// esc exits input mode and discards the buffer (esc is reserved for exit in v1,
-// not forwarded to the agent).
-func TestInputModeEscExits(t *testing.T) {
+// Esc and Ctrl-C are forwarded to the agent (cancel / interrupt), NOT eaten as an
+// exit — that is the whole point of a dedicated exit key. They issue a send
+// command and stay in input mode.
+func TestInputModeEscAndCtrlCPassThrough(t *testing.T) {
+	for _, kt := range []tea.KeyType{tea.KeyEsc, tea.KeyCtrlC} {
+		m := liveModel()
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
+		m = next.(Model)
+		next, cmd := m.Update(tea.KeyMsg{Type: kt})
+		m = next.(Model)
+		if cmd == nil {
+			t.Errorf("%v should be forwarded to the agent (a send command)", kt)
+		}
+		if !m.inputMode {
+			t.Errorf("%v must not exit input mode — ctrl+q is the exit key", kt)
+		}
+	}
+}
+
+// Ctrl-Q is the dedicated exit key: it leaves input mode and is NOT forwarded
+// (no send command), so the agent never sees it.
+func TestInputModeCtrlQExits(t *testing.T) {
 	m := liveModel()
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
 	m = next.(Model)
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
-	m = next.(Model)
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlQ})
 	m = next.(Model)
 	if m.inputMode {
-		t.Fatal("esc did not exit input mode")
+		t.Fatal("ctrl+q did not exit input mode")
 	}
-	if m.inputBuf != "" {
-		t.Errorf("esc should discard the buffer, got %q", m.inputBuf)
+	if cmd != nil {
+		t.Error("ctrl+q should not be forwarded to the agent")
 	}
 }
 
-// Enter on a non-empty buffer issues a send command and clears the buffer while
-// staying in input mode (so the user can keep typing as the response streams).
-// An empty buffer is a no-op (no command, no exit).
-func TestInputModeEnterSendsAndClears(t *testing.T) {
+// A key arriving after the session died (paneLive false) exits input mode with a
+// clear no-session note instead of firing into nothing.
+func TestInputModeExitsWhenSessionDies(t *testing.T) {
 	m := liveModel()
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
 	m = next.(Model)
-
-	// Empty Enter: no command, still in input mode, buffer stays empty.
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	// Capture now fails: paneLive flips false.
+	next, _ = m.Update(paneMsg{err: errTest})
 	m = next.(Model)
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	m = next.(Model)
+	if m.inputMode {
+		t.Fatal("a keystroke into a dead session should exit input mode")
+	}
 	if cmd != nil {
-		t.Error("empty Enter should not issue a send command")
+		t.Error("no key should be sent when the session is dead")
 	}
-	if !m.inputMode {
-		t.Error("empty Enter should not exit input mode")
+	if !strings.Contains(m.View(), "no live session") {
+		t.Errorf("expected a no-session state in the view:\n%s", m.View())
 	}
+}
 
-	for _, r := range "hi" {
-		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
-		m = next.(Model)
+// keyFor translates a bubbletea KeyMsg into the neutral tower.Key: printable
+// runes (and space) become literal Text, every other key becomes a Name.
+func TestKeyFor(t *testing.T) {
+	tests := []struct {
+		msg  tea.KeyMsg
+		want tower.Key
+	}{
+		{tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")}, tower.Key{Text: "a"}},
+		{tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("héllo")}, tower.Key{Text: "héllo"}},
+		{tea.KeyMsg{Type: tea.KeySpace}, tower.Key{Text: " "}},
+		{tea.KeyMsg{Type: tea.KeyEnter}, tower.Key{Name: "enter"}},
+		{tea.KeyMsg{Type: tea.KeyUp}, tower.Key{Name: "up"}},
+		{tea.KeyMsg{Type: tea.KeyCtrlC}, tower.Key{Name: "ctrl+c"}},
+		{tea.KeyMsg{Type: tea.KeyBackspace}, tower.Key{Name: "backspace"}},
 	}
-	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = next.(Model)
-	if cmd == nil {
-		t.Error("Enter on a non-empty buffer should issue a send command")
-	}
-	if m.inputBuf != "" {
-		t.Errorf("Enter should clear the buffer, got %q", m.inputBuf)
-	}
-	if !m.inputMode {
-		t.Error("Enter should keep input mode active for continued typing")
+	for _, tt := range tests {
+		if got := keyFor(tt.msg); got != tt.want {
+			t.Errorf("keyFor(%v) = %+v, want %+v", tt.msg, got, tt.want)
+		}
 	}
 }
 

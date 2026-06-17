@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
 )
@@ -237,17 +238,68 @@ func capturePane(socket, session string) (string, error) {
 	return string(out), nil
 }
 
-// sendKeys types text into a tmux session's active pane on the given gt socket,
-// then a separate Enter to submit it (line-buffered: the whole line lands at
-// once). The text goes with -l (literal) so its content is never interpreted as
-// tmux key names — a message of "Enter" or "C-c" is typed, not executed — and
-// -- ends flag parsing so leading dashes are safe. The trailing Enter is a
-// second invocation because -l disables key-name lookup. Either exec failing
-// (no live session, tmux missing) surfaces as an error the caller turns into a
-// clear "no live session" state.
-func sendKeys(socket, session, text string) error {
-	if err := exec.Command("tmux", tmuxArgs(socket, "send-keys", "-t", session, "-l", "--", text)...).Run(); err != nil {
-		return err
+// Key is one keystroke the TUI forwards to a pane in live input mode (gtt-fwy).
+// It is either literal Text — printable runes the user typed, or a paste, sent
+// verbatim — or a Name'd special key (a bubbletea KeyMsg.String() value such as
+// "enter", "up", or "ctrl+c") translated to tmux's key-name vocabulary. Text
+// takes priority when both are set. Keeping this neutral struct here (rather than
+// a bubbletea type) keeps the tmux key-name mapping in pkg/tower, not the TUI.
+type Key struct {
+	Text string // literal characters to type (printable runes / a paste)
+	Name string // bubbletea key name for a special key (used when Text == "")
+}
+
+// tmuxKeyNames maps bubbletea key names (KeyMsg.String() values) to the tmux
+// send-keys key names that reproduce them in the target pane. Control chords are
+// not listed: tmuxKeyName derives "ctrl+<r>" -> "C-<r>" generically.
+var tmuxKeyNames = map[string]string{
+	"enter":     "Enter",
+	"up":        "Up",
+	"down":      "Down",
+	"left":      "Left",
+	"right":     "Right",
+	"esc":       "Escape",
+	"tab":       "Tab",
+	"shift+tab": "BTab",
+	"backspace": "BSpace",
+	"delete":    "DC",
+	"home":      "Home",
+	"end":       "End",
+	"pgup":      "PageUp",
+	"pgdown":    "PageDown",
+	"space":     "Space",
+}
+
+// tmuxKeyName resolves a bubbletea key name to its tmux send-keys equivalent. A
+// "ctrl+<char>" chord maps generically to "C-<char>" so the whole control range
+// (C-c, C-d, C-u, …) works without enumerating each. ok=false for an unmapped
+// name — the caller drops that keystroke rather than send something wrong.
+func tmuxKeyName(name string) (string, bool) {
+	if t, ok := tmuxKeyNames[name]; ok {
+		return t, true
 	}
-	return exec.Command("tmux", tmuxArgs(socket, "send-keys", "-t", session, "Enter")...).Run()
+	if r, ok := strings.CutPrefix(name, "ctrl+"); ok && utf8.RuneCountInString(r) == 1 {
+		return "C-" + r, true
+	}
+	return "", false
+}
+
+// sendKey forwards a single keystroke to a tmux session's active pane on the
+// given gt socket, LIVE — no trailing Enter, because in pass-through Enter is its
+// own keystroke (gtt-fwy replaces the line-buffered sendKeys). Literal text goes
+// with -l -- so its content is never read as a key name (a typed "Enter"/"C-c" is
+// typed, not executed) and leading dashes are safe; a named key is translated by
+// tmuxKeyName and sent as a tmux key (no -l, so tmux looks it up). An unmapped
+// name is a silent no-op so an unknown special key is dropped, not mis-sent. A
+// failing exec (no live session, tmux missing) surfaces as an error the caller
+// turns into a clear "no live session" state.
+func sendKey(socket, session string, k Key) error {
+	if k.Text != "" {
+		return exec.Command("tmux", tmuxArgs(socket, "send-keys", "-t", session, "-l", "--", k.Text)...).Run()
+	}
+	name, ok := tmuxKeyName(k.Name)
+	if !ok {
+		return nil
+	}
+	return exec.Command("tmux", tmuxArgs(socket, "send-keys", "-t", session, name)...).Run()
 }

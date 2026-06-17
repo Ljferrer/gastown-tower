@@ -774,17 +774,18 @@ func TestCapturePaneUnknownRig(t *testing.T) {
 	}
 }
 
-// SendKeys resolves the agent's session via the cached prefix map (the same
-// resolution CapturePane uses) and forwards the text to the socket-bound send
-// func with the resolved session name.
-func TestSendKeys(t *testing.T) {
+// SendKey resolves the agent's session via the cached prefix map (the same
+// resolution CapturePane uses) and forwards the keystroke to the socket-bound
+// send func with the resolved session name.
+func TestSendKey(t *testing.T) {
 	clock := time.Unix(1_700_000_000, 0)
-	var gotSession, gotText string
+	var gotSession string
+	var gotKey Key
 	c := &Collector{
 		EnrichTTL: time.Minute,
 		now:       func() time.Time { return clock },
-		sendKeys: func(session, text string) error {
-			gotSession, gotText = session, text
+		sendKey: func(session string, k Key) error {
+			gotSession, gotKey = session, k
 			return nil
 		},
 	}
@@ -792,35 +793,35 @@ func TestSendKeys(t *testing.T) {
 	c.enrichAt = clock
 
 	a := Agent{AgentRef: AgentRef{Name: "furiosa", Role: "polecat", Rig: "GigaClip", Group: "GigaClip"}}
-	if err := c.SendKeys(a, "hello agent"); err != nil {
-		t.Fatalf("SendKeys error: %v", err)
+	if err := c.SendKey(a, Key{Text: "h"}); err != nil {
+		t.Fatalf("SendKey error: %v", err)
 	}
 	if gotSession != "gc-furiosa" {
 		t.Errorf("sent to wrong session %q, want gc-furiosa", gotSession)
 	}
-	if gotText != "hello agent" {
-		t.Errorf("sent wrong text %q, want %q", gotText, "hello agent")
+	if gotKey != (Key{Text: "h"}) {
+		t.Errorf("sent wrong key %+v, want {Text:h}", gotKey)
 	}
 }
 
-// SendKeys errors (so the caller shows a no-session state) when the agent's rig
+// SendKey errors (so the caller shows a no-session state) when the agent's rig
 // has no known session prefix, and never invokes the send func.
-func TestSendKeysUnknownRig(t *testing.T) {
+func TestSendKeyUnknownRig(t *testing.T) {
 	clock := time.Unix(1_700_000_000, 0)
 	called := false
 	c := &Collector{
 		EnrichTTL: time.Minute,
 		now:       func() time.Time { return clock },
-		sendKeys:  func(string, string) error { called = true; return nil },
+		sendKey:   func(string, Key) error { called = true; return nil },
 	}
 	c.enrich = enrichment{prefixes: map[string]string{}} // no prefix for any rig
 	c.enrichAt = clock
 
 	a := Agent{AgentRef: AgentRef{Name: "ghost", Role: "polecat", Rig: "Unknown", Group: "Unknown"}}
-	if err := c.SendKeys(a, "x"); err == nil {
+	if err := c.SendKey(a, Key{Name: "enter"}); err == nil {
 		t.Fatal("expected error for unresolvable rig, got nil")
 	}
 	if called {
-		t.Error("sendKeys should not be invoked when the session name does not resolve")
+		t.Error("sendKey should not be invoked when the session name does not resolve")
 	}
 }

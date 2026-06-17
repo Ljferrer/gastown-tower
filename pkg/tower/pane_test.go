@@ -162,6 +162,42 @@ func TestTmuxSession(t *testing.T) {
 	}
 }
 
+// tmuxKeyName translates bubbletea key names (KeyMsg.String() values) to tmux
+// send-keys names: explicit specials from the table, ctrl chords derived
+// generically as C-<char>, and unmapped names rejected so the caller drops them.
+func TestTmuxKeyName(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+		ok   bool
+	}{
+		{"enter", "Enter", true},
+		{"up", "Up", true},
+		{"down", "Down", true},
+		{"left", "Left", true},
+		{"right", "Right", true},
+		{"esc", "Escape", true},
+		{"tab", "Tab", true},
+		{"shift+tab", "BTab", true},
+		{"backspace", "BSpace", true},
+		{"space", "Space", true},
+		// Control chords derive generically, not from the table.
+		{"ctrl+c", "C-c", true},
+		{"ctrl+d", "C-d", true},
+		{"ctrl+u", "C-u", true},
+		// Unmapped: multi-rune ctrl combos and unknown names are dropped.
+		{"ctrl+up", "", false},
+		{"f1", "", false},
+		{"", "", false},
+	}
+	for _, tt := range tests {
+		got, ok := tmuxKeyName(tt.name)
+		if got != tt.want || ok != tt.ok {
+			t.Errorf("tmuxKeyName(%q) = %q,%v want %q,%v", tt.name, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
 // townSocketName mirrors gt's per-town socket derivation: a sanitized basename,
 // a hyphen, and 6 hex chars of the canonical-path hash. It is deterministic for
 // a given path and path-sensitive (two towns sharing a basename differ).
