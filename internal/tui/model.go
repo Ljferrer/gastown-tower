@@ -52,6 +52,7 @@ type Model struct {
 	eventScroll    int
 	previewText    string // last captured tmux pane text for the selected agent
 	previewVisible bool   // 'p' toggles the live-preview region (default on)
+	previewOffset  int    // '+'/'-' delta on top of the proportional preview height (clamped)
 	width          int
 	height         int
 	err            error
@@ -115,6 +116,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		// The proportional base height just changed; re-normalize the +/- offset
+		// against the new bounds so the region re-lays-out and subsequent presses
+		// still move exactly one row.
+		m.previewOffset = m.clampOffset(m.previewOffset)
 	case tickMsg:
 		// Re-capture the selected agent's pane every tick so the preview keeps
 		// churning live (spinner and all) even when the cursor isn't moving.
@@ -175,6 +180,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Toggle the live-preview region. Re-show fires an immediate
 			// capture so it isn't blank until the next tick.
 			m.previewVisible = !m.previewVisible
+			return m, m.previewCmd()
+		case "+", "=":
+			// Grow the preview region one row. '=' is the shift-less alias.
+			// clampOffset keeps the result within [min, ~80% height], so a
+			// press at the ceiling is a no-op and never builds dead offset.
+			m.previewOffset = m.clampOffset(m.previewOffset + 1)
+			return m, m.previewCmd()
+		case "-":
+			// Shrink the preview region one row, floored at the min height.
+			m.previewOffset = m.clampOffset(m.previewOffset - 1)
 			return m, m.previewCmd()
 		case "enter", " ":
 			if m.focus == panelAgents && m.cursor < len(m.agents) {
@@ -321,7 +336,7 @@ func (m Model) View() string {
 	b.WriteString(m.renderConvoysPanel())
 	b.WriteString(m.renderEventsPanel())
 
-	b.WriteString("\n" + helpStyle.Render("tab focus · j/k scroll · enter/click expand · / search · t all-events · p preview · q quit") + "\n")
+	b.WriteString("\n" + helpStyle.Render("tab focus · j/k scroll · enter/click expand · / search · t all-events · p preview · +/- size · q quit") + "\n")
 	return b.String()
 }
 
@@ -453,18 +468,59 @@ func (m Model) agentAtY(y int) int {
 	return -1
 }
 
-// previewHeight is the number of pane-text rows the preview region reserves:
-// proportional (~30%) to the terminal height and fixed regardless of how much
-// pane content exists, so the region never grows/shrinks as the operator arrows
-// between agents (the "stable, no layout jump" requirement). Floors keep it
-// usable on tiny terminals and before the first WindowSizeMsg arrives.
-func (m Model) previewHeight() int {
+// previewMinHeight is the floor for the preview region — enough to stay usable
+// on tiny terminals and as the hard limit '-' shrinks toward.
+const previewMinHeight = 3
+
+// previewBaseHeight is the proportional (~30%) preview height before the +/-
+// offset is applied, with a sane default until the first WindowSizeMsg lands.
+func (m Model) previewBaseHeight() int {
 	if m.height <= 0 {
-		return 8 // no size yet; a sane default until WindowSizeMsg lands
+		return 8
 	}
-	h := m.height * 3 / 10
-	if h < 3 {
-		h = 3
+	return m.height * 3 / 10
+}
+
+// previewMaxHeight caps the preview region at ~80% of the terminal height (the
+// gtt-60p clamp), never below the min floor.
+func (m Model) previewMaxHeight() int {
+	if m.height <= 0 {
+		return 8
+	}
+	if max := m.height * 8 / 10; max > previewMinHeight {
+		return max
+	}
+	return previewMinHeight
+}
+
+// clampOffset normalizes the +/- offset so the effective height (base + offset)
+// stays within [min, max]. Keeping the offset itself in range — rather than only
+// clamping the rendered height — means a press at a bound is a no-op and the
+// first press back off the bound moves exactly one row (no dead offset buildup).
+func (m Model) clampOffset(off int) int {
+	base := m.previewBaseHeight()
+	lo, hi := previewMinHeight-base, m.previewMaxHeight()-base
+	if off > hi {
+		off = hi
+	}
+	if off < lo {
+		off = lo
+	}
+	return off
+}
+
+// previewHeight is the number of pane-text rows the preview region reserves:
+// the proportional (~30%) base plus the operator's +/- offset, clamped between
+// previewMinHeight and ~80% of the terminal height. It is fixed regardless of
+// how much pane content exists, so the region never grows/shrinks as the operator
+// arrows between agents (the "stable, no layout jump" requirement).
+func (m Model) previewHeight() int {
+	h := m.previewBaseHeight() + m.previewOffset
+	if h < previewMinHeight {
+		h = previewMinHeight
+	}
+	if max := m.previewMaxHeight(); h > max {
+		h = max
 	}
 	return h
 }

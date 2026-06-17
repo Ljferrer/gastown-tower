@@ -795,3 +795,98 @@ func TestClip(t *testing.T) {
 		t.Errorf("clip with no width should be a no-op: %q", got)
 	}
 }
+
+// '+' grows and '-' shrinks the preview region by one row per press, applied as
+// an offset on top of the proportional base height. The chosen offset persists.
+func TestPreviewResize(t *testing.T) {
+	m := newWithSnap()
+	m.width, m.height = 80, 30
+	base := m.previewHeight() // proportional base, no offset yet
+
+	press := func(k string) {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)})
+		m = next.(Model)
+	}
+
+	press("+")
+	if got := m.previewHeight(); got != base+1 {
+		t.Errorf("'+' grew height to %d, want %d", got, base+1)
+	}
+	press("+")
+	if got := m.previewHeight(); got != base+2 {
+		t.Errorf("second '+' grew height to %d, want %d", got, base+2)
+	}
+	press("-")
+	if got := m.previewHeight(); got != base+1 {
+		t.Errorf("'-' shrank height to %d, want %d", got, base+1)
+	}
+	// '=' is a shift-less convenience alias for '+'.
+	press("=")
+	if got := m.previewHeight(); got != base+2 {
+		t.Errorf("'=' grew height to %d, want %d", got, base+2)
+	}
+}
+
+// The offset is clamped: '-' never shrinks below the 3-line floor and '+' never
+// grows past ~80% of the terminal height, and repeated presses at a bound don't
+// build up dead offset (one press back off the bound moves exactly one row).
+func TestPreviewResizeClamp(t *testing.T) {
+	m := newWithSnap()
+	m.width, m.height = 80, 30
+
+	press := func(k string) {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)})
+		m = next.(Model)
+	}
+
+	// Shrink hard against the floor.
+	for i := 0; i < 50; i++ {
+		press("-")
+	}
+	if got := m.previewHeight(); got != 3 {
+		t.Errorf("preview floored at %d, want 3", got)
+	}
+	// One '+' must move off the floor by exactly one row (no dead offset).
+	press("+")
+	if got := m.previewHeight(); got != 4 {
+		t.Errorf("'+' off the floor gave %d, want 4", got)
+	}
+
+	// Grow hard against the ceiling (~80% of height).
+	max := m.height * 8 / 10
+	for i := 0; i < 50; i++ {
+		press("+")
+	}
+	if got := m.previewHeight(); got != max {
+		t.Errorf("preview capped at %d, want %d", got, max)
+	}
+	// One '-' must move off the ceiling by exactly one row.
+	press("-")
+	if got := m.previewHeight(); got != max-1 {
+		t.Errorf("'-' off the ceiling gave %d, want %d", got, max-1)
+	}
+}
+
+// The chosen preview size survives moving the cursor between agents and ticks.
+func TestPreviewSizePersists(t *testing.T) {
+	m := newWithSnap()
+	m.width, m.height = 80, 30
+	base := m.previewHeight()
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("+")})
+	m = next.(Model)
+	grown := m.previewHeight()
+	if grown != base+1 {
+		t.Fatalf("setup: '+' gave %d, want %d", grown, base+1)
+	}
+
+	// Arrow to another agent, then a tick fires.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(Model)
+	next, _ = m.Update(tickMsg(time.Now()))
+	m = next.(Model)
+
+	if got := m.previewHeight(); got != grown {
+		t.Errorf("preview size %d after nav/tick, want %d", got, grown)
+	}
+}
